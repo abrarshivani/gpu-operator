@@ -146,7 +146,17 @@ prepare_workspace() {
     INDEX_FILE="$(mktemp "${t}-idx.XXXXXX")"
     TOOLS_CSV="$(mktemp "${t}-tools-csv.XXXXXX")"
     TOOLS_INDEX="$(mktemp "${t}-tools-idx.XXXXXX")"
-    OUT_TMP="$(mktemp "${t}-out.XXXXXX")"
+
+    # The document is composed beside its destination rather than under TMPDIR,
+    # so the last step can be a same-filesystem rename(2). From TMPDIR the
+    # rename would usually cross filesystems and fall back to copy-then-unlink,
+    # which reintroduces the partial-write window it is meant to close. The EXIT
+    # trap covers it, so an aborted run leaves no stray file in the worktree.
+    local out_dir
+    out_dir="$(dirname "${OUTPUT}")"
+    mkdir -p "${out_dir}"
+    OUT_TMP="$(mktemp "${out_dir}/.$(basename "${OUTPUT}").XXXXXX")"
+
     trap 'rm -rf "${SAVE_ROOT}"; rm -f "${COMBINED_CSV}" "${INDEX_FILE}" "${TOOLS_CSV}" "${TOOLS_INDEX}" "${OUT_TMP}"' EXIT
 }
 
@@ -417,8 +427,10 @@ emit_sections() {
 
 compose_document() {
     log "Composing ${OUTPUT}..."
-    # Build in a temp file and move into place, so a failure part way through
-    # does not leave the committed file truncated in a developer's worktree.
+    # Build in a temp file in the destination directory and rename it into
+    # place. The rename is atomic, so the committed file is either the previous
+    # complete document or the new one; a run that dies part way through leaves
+    # the old file intact instead of truncating it in a developer's worktree.
     {
         cat <<'EOF'
 # Third-Party Notices
@@ -482,10 +494,10 @@ EOF
 EOF
         emit_sections "${TOOLS_INDEX}" "${LICENSES_DIR}/.tools" source
     } > "${OUT_TMP}"
-    mkdir -p "$(dirname "${OUTPUT}")"
-    cp "${OUT_TMP}" "${OUTPUT}"
-    # mktemp creates 0600; the committed file should be world-readable.
-    chmod 644 "${OUTPUT}"
+    # mktemp creates 0600; the committed file should be world-readable. Set the
+    # mode before the rename so it is never briefly 0600 at its final path.
+    chmod 644 "${OUT_TMP}"
+    mv "${OUT_TMP}" "${OUTPUT}"
 }
 
 # --- entry point ---
