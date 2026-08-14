@@ -180,10 +180,11 @@ collapse_index() {
     '
 }
 
-# Rows carry module@version from modules.txt rather than a URL: in vendor mode
+# Rows carry the module path from modules.txt rather than a URL: in vendor mode
 # go-licenses reports a URL into this repo at HEAD, which stops describing
-# released content once main moves. Longest prefix wins: a license may sit
-# below the module root.
+# released content once main moves. The version is deliberately left out: a
+# dependency bump with no license text change would otherwise dirty this file
+# on every update. Longest prefix wins: a license may sit below the module root.
 annotate_modules() {
     awk -v modfile="${MODULES_TXT}" '
         BEGIN {
@@ -201,10 +202,10 @@ annotate_modules() {
                         exit 1
                     }
                     mods[++m] = f[2]
-                    disp[f[2]] = f[r] "@" f[r + 1]
+                    disp[f[2]] = f[r]
                 } else {
                     mods[++m] = f[2]
-                    disp[f[2]] = f[2] "@" f[3]
+                    disp[f[2]] = f[2]
                 }
             }
             close(modfile)
@@ -233,7 +234,7 @@ build_indexes() {
         || die "go-licenses produced no entries for ${PACKAGES[*]} — refusing to write empty notices file."
 
     if cut -d, -f4 "${INDEX_FILE}" | LC_ALL=C grep -qx 'unknown'; then
-        die "could not resolve module@version for some packages from ${MODULES_TXT}." \
+        die "could not resolve the owning module for some packages from ${MODULES_TXT}." \
             "Run 'go mod vendor' and re-run, rather than committing a file with unattributed entries."
     fi
 
