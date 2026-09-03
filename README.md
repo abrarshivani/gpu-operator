@@ -5,6 +5,7 @@
 # NVIDIA GPU Operator
 
 ![nvidia-gpu-operator](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/egx/nvidia-egx-platform-gold-image-full-2c50-d@2x.jpg)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fabrarshivani%2Fgpu-operator.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fabrarshivani%2Fgpu-operator?ref=badge_shield)
 
 Kubernetes provides access to special hardware resources such as NVIDIA GPUs, NICs, Infiniband adapters and other devices through the [device plugin framework](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/). However, configuring and managing nodes with these hardware resources requires configuration of multiple software components such as drivers, container runtimes or other libraries which  are difficult and prone to errors.
 The NVIDIA GPU Operator uses the [operator framework](https://cloud.redhat.com/blog/introducing-the-operator-framework) within Kubernetes to automate the management of all NVIDIA software components needed to provision GPU. These components include the NVIDIA drivers (to enable CUDA), Kubernetes device plugin for GPUs, the NVIDIA Container Runtime, automatic node labelling, [DCGM](https://developer.nvidia.com/dcgm) based monitoring and others.
@@ -63,3 +64,7 @@ For information on platform support and getting started, visit the official docu
 
 ## Support and Getting Help
 Please open [an issue on the GitHub project](https://github.com/NVIDIA/gpu-operator/issues/new) for any questions. Your feedback is appreciated.
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fabrarshivani%2Fgpu-operator.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fabrarshivani%2Fgpu-operator?ref=badge_large)
