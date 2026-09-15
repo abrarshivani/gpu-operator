@@ -14,8 +14,8 @@ Go distribution itself. Modules used only by this repository's tests and build
 tooling are not redistributed and are not listed.
 
 Each dependency's Location links to its license file as vendored in this
-repository, so every link serves the exact text reproduced below it. Where
-a dependency ships more than one license-bearing file, such as a PATENTS or
+repository, so every link serves the exact text reproduced below it. Where a
+dependency ships more than one license-bearing file, such as a PATENTS or
 NOTICE alongside its LICENSE, each one is listed and reproduced.
 
 The `gpu-operator` image uses `nvcr.io/nvidia/distroless/cc` as a base image.
