@@ -1,0 +1,4 @@
+{
+  "name": "NVIDIA GPU Operator",
+  "install": "bash ./.cursor/install.sh"
+}
