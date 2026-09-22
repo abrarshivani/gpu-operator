@@ -280,10 +280,10 @@ assert_fails "expand_dockerfile_args refuses an ARG with no default" \
     env DOCKERFILE="${bundled_dockerfile}" bash -c \
     'source "$1"; expand_dockerfile_args '"'"'${UNDECLARED_ARG}'"'"'' _ "${HERE}/generate-third-party-notices.sh"
 
-assert_eq "$(printf '/busybox\t/busybox\n/workspace/gpu-operator\t/usr/bin/')" \
+assert_eq "$(printf '/busybox\t/busybox\tshell\n/workspace/gpu-operator\t/usr/bin/\tbuilder\nassets\t/opt/gpu-operator/\t-')" \
     "$(DOCKERFILE="${bundled_dockerfile}" \
        final_stage_copies nvcr.io/nvidia/distroless/cc)" \
-    "final_stage_copies reads only the final stage's COPY --from lines"
+    "final_stage_copies reads the final stage's copies and tags each with its source stage"
 
 # shellcheck disable=SC2016
 assert_fails "final_stage_copies refuses an empty base repository" \
@@ -293,6 +293,7 @@ assert_fails "final_stage_copies refuses an empty base repository" \
 bundled_fixture="$(temp_path)"
 printf '# source_path\tcomponent\tdisposition\tversion\tlicense_identifier\tlicense_file\tnotices_url\tprovenance_digest\tattribution_note\n' > "${bundled_fixture}"
 printf '/workspace/gpu-operator\tgpu-operator\tproject\t-\t-\t-\t-\t-\t-\n' >> "${bundled_fixture}"
+printf 'assets\tassets\tproject\t-\t-\t-\t-\t-\t-\n' >> "${bundled_fixture}"
 # shellcheck disable=SC2016
 assert_fails "check_bundled_coverage fails when a copied path has no row" \
     env DOCKERFILE="${bundled_dockerfile}" BUNDLED_COMPONENTS="${bundled_fixture}" \
@@ -318,15 +319,25 @@ assert_fails "check_bundled_rows fails when the named licence text is missing" \
 recorded_fixture="$(temp_path)"
 printf '/busybox\tbusybox\tthird-party\t1:1.37.0-6\tGPL-2.0-only\tbusybox/LICENSE\thttps://example.invalid/copyright\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t\n' > "${recorded_fixture}"
 # shellcheck disable=SC2016
-assert_fails "check_version_provenance fails when the recorded image is no longer built from" \
-    env DOCKERFILE="${bundled_dockerfile}" BUNDLED_COMPONENTS="${recorded_fixture}" bash -c \
-    'source "$1"; check_version_provenance' _ "${HERE}/generate-third-party-notices.sh"
+provenance_dockerfile="$(temp_path)"
+printf 'FROM debian@sha256:%064d AS old-shell\nFROM alpine@sha256:%064d AS new-shell\nFROM nvcr.io/nvidia/distroless/cc:v1@sha256:%064d\nCOPY --from=new-shell /busybox /busybox\n' 1 2 3 > "${provenance_dockerfile}"
+provenance_catalogue="$(temp_path)"
+printf '/busybox\tbusybox\tthird-party\t1.0\tGPL-2.0-only\tb/L\thttps://x\tsha256:%064d\t-\n' 1 > "${provenance_catalogue}"
+# shellcheck disable=SC2016
+assert_fails "check_version_provenance rejects a digest from a stage the component is not copied from" \
+    env DOCKERFILE="${provenance_dockerfile}" BUNDLED_COMPONENTS="${provenance_catalogue}" bash -c \
+    'source "$1"; check_version_provenance nvcr.io/nvidia/distroless/cc' _ "${HERE}/generate-third-party-notices.sh"
 
-printf '/busybox\tbusybox\tthird-party\t1:1.37.0-6\tGPL-2.0-only\tbusybox/LICENSE\thttps://example.invalid/copyright\tsha256:0000000000000000000000000000000000000000000000000000000000000000\t\n' > "${recorded_fixture}"
+# shellcheck disable=SC2016
+assert_fails "check_version_provenance fails when the recorded image is no longer built from" \
+    env DOCKERFILE="${provenance_dockerfile}" BUNDLED_COMPONENTS="${recorded_fixture}" bash -c \
+    'source "$1"; check_version_provenance nvcr.io/nvidia/distroless/cc' _ "${HERE}/generate-third-party-notices.sh"
+
+printf '/busybox\tbusybox\tthird-party\t1.0\tGPL-2.0-only\tb/L\thttps://x\tsha256:%064d\t-\n' 2 > "${recorded_fixture}"
 assert_eq "0" \
-    "$(DOCKERFILE="${bundled_dockerfile}" BUNDLED_COMPONENTS="${recorded_fixture}" bash -c \
-       'source "$1"; check_version_provenance' _ "${HERE}/generate-third-party-notices.sh" >/dev/null 2>&1; echo $?)" \
-    "check_version_provenance passes while the recorded image is still in the Dockerfile"
+    "$(DOCKERFILE="${provenance_dockerfile}" BUNDLED_COMPONENTS="${recorded_fixture}" bash -c \
+       'source "$1"; check_version_provenance nvcr.io/nvidia/distroless/cc' _ "${HERE}/generate-third-party-notices.sh" >/dev/null 2>&1; echo $?)" \
+    "check_version_provenance passes when the digest matches the supplying stage"
 
 
 shape_fixture="$(temp_path)"
@@ -369,7 +380,7 @@ COPY --from=builder /intermediate /intermediate
 FROM nvcr.io/nvidia/distroless/cc:v2@sha256:3333333333333333333333333333333333333333333333333333333333333333
 COPY --from=shell /busybox /busybox
 DOCKERFILE
-assert_eq "$(printf '/busybox\t/busybox')" \
+assert_eq "$(printf '/busybox\t/busybox\tshell')" \
     "$(DOCKERFILE="${stage_leak_dockerfile}" final_stage_copies nvcr.io/nvidia/distroless/cc)" \
     "final_stage_copies ignores an earlier stage built from the same image"
 
@@ -379,7 +390,7 @@ FROM nvcr.io/nvidia/distroless/cc:v1@sha256:000000000000000000000000000000000000
 COPY --chown=0:0 --from=builder /a /b /usr/bin/
 COPY assets /opt/
 DOCKERFILE
-assert_eq "$(printf '/a\t/usr/bin/\n/b\t/usr/bin/')" \
+assert_eq "$(printf '/a\t/usr/bin/\tbuilder\n/b\t/usr/bin/\tbuilder\nassets\t/opt/\t-')" \
     "$(DOCKERFILE="${flags_dockerfile}" final_stage_copies nvcr.io/nvidia/distroless/cc)" \
     "final_stage_copies handles COPY flags and several sources"
 

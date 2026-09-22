@@ -363,8 +363,11 @@ final_stage_copies() {
                 if ($i ~ /^--/) { if ($i ~ /^--from=/) from_stage = $i; continue }
                 first_source = i; break
             }
-            if (from_stage == "" || first_source == 0) next
-            for (i = first_source; i < NF; i++) copies[++copy_count] = $i "\t" $NF
+            if (first_source == 0) next
+            sub(/^--from=/, "", from_stage)
+            if (from_stage == "") from_stage = "-"
+            for (i = first_source; i < NF; i++)
+                copies[++copy_count] = $i "\t" $NF "\t" from_stage
         }
         END {
             if (!final_stage_matches) {
@@ -416,7 +419,7 @@ check_bundled_coverage() {
     [[ -n "${base_repository}" ]] \
         || die "check_bundled_coverage needs the repository of the image the final stage is built from."
     local source_path destination expanded
-    while IFS=$'\t' read -r source_path destination; do
+    while IFS=$'\t' read -r source_path destination _; do
         [[ -z "${source_path}" ]] && continue
         expanded="$(expand_dockerfile_args "${source_path}")" || exit 1
         bundled_component_row "${source_path}" >/dev/null \
@@ -443,13 +446,46 @@ check_bundled_rows() {
     done < "${BUNDLED_ROWS}"
 }
 
+stage_image_digest() {
+    local stage="$1"
+    LC_ALL=C awk -v stage="${stage}" '
+        $1 == "FROM" {
+            for (i = 2; i <= NF; i++) {
+                if ($i == "AS" || $i == "as") {
+                    if ($(i + 1) == stage) {
+                        image = $2
+                        if (match(image, /@sha256:[0-9a-f]{64}$/))
+                            print substr(image, RSTART + 1)
+                        exit
+                    }
+                }
+            }
+        }
+    ' "${DOCKERFILE}"
+}
+
 check_version_provenance() {
+    local base_repository="$1"
     local source_path component provenance_digest
+    local copy_source copy_stage from_stage stage_digest
+
     while IFS=$'\t' read -r source_path component _ _ _ _ _ provenance_digest _; do
         case "${source_path}" in ''|'#'*) continue ;; esac
         [[ "${provenance_digest}" == "-" ]] && continue
-        LC_ALL=C grep -qF "${provenance_digest}" "${DOCKERFILE}" \
-            || die "${BUNDLED_COMPONENTS} records ${component}'s version from ${provenance_digest}, which ${DOCKERFILE} no longer builds from." \
+
+        from_stage=""
+        while IFS=$'\t' read -r copy_source _ copy_stage; do
+            [[ "${copy_source}" == "${source_path}" ]] && { from_stage="${copy_stage}"; break; }
+        done < <(final_stage_copies "${base_repository}")
+
+        [[ -n "${from_stage}" && "${from_stage}" != "-" ]] \
+            || die "${BUNDLED_COMPONENTS} records a provenance digest for ${component}, which ${DOCKERFILE} does not copy from a build stage."
+
+        stage_digest="$(stage_image_digest "${from_stage}")"
+        [[ -n "${stage_digest}" ]] \
+            || die "${DOCKERFILE} stage '${from_stage}' supplying ${component} is not built from a digest-pinned image."
+        [[ "${stage_digest}" == "${provenance_digest}" ]] \
+            || die "${component} is recorded against ${provenance_digest}, but ${DOCKERFILE} builds stage '${from_stage}' from ${stage_digest}." \
                    "Re-check the version in the new image and update the row."
     done < <(LC_ALL=C awk '{ print }' "${BUNDLED_COMPONENTS}")
 }
@@ -459,7 +495,7 @@ third_party_bundled_rows() {
     local source_path destination expanded row
     local component disposition version license license_file notices_url notes
 
-    while IFS=$'\t' read -r source_path destination; do
+    while IFS=$'\t' read -r source_path destination _; do
         [[ -z "${source_path}" ]] && continue
         expanded="$(expand_dockerfile_args "${source_path}")" || return 1
         row="$(bundled_component_row "${source_path}")" \
@@ -733,7 +769,7 @@ main() {
         check_bundled_coverage "${BASE_IMAGE_REPOSITORY}"
         third_party_bundled_rows "${BASE_IMAGE_REPOSITORY}" > "${BUNDLED_ROWS}"
         check_bundled_rows
-        check_version_provenance
+        check_version_provenance "${BASE_IMAGE_REPOSITORY}"
     fi
 
     collect_licenses
