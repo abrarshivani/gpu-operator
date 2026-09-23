@@ -18,662 +18,266 @@ package controllers
 
 import (
 	"context"
-	"errors"
+	"maps"
 	"testing"
 
+	"github.com/go-logr/logr"
+	promcli "github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	gpuv1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1"
+	apiimagev1 "github.com/openshift/api/image/v1"
 )
 
-func TestGetGPUNodeOSInfo(t *testing.T) {
-	testCases := []struct {
-		name              string
-		osName            string
-		osVersion         string
-		expected          string
-		expectError       bool
-		errorContainsText string
-	}{
-		{
-			name:      "talos version with v prefix",
-			osName:    "talos",
-			osVersion: "v1.12.6",
-			expected:  "talosv1.12.6",
-		},
-		{
-			name:      "rhel 9 omits minor version",
-			osName:    "rhel",
-			osVersion: "9.4",
-			expected:  "rhel9",
-		},
-		{
-			name:      "rhel 8 omits minor version",
-			osName:    "rhel",
-			osVersion: "8.10",
-			expected:  "rhel8",
-		},
-		{
-			name:      "rhel 10 omits minor version",
-			osName:    "rhel",
-			osVersion: "10.2",
-			expected:  "rhel10",
-		},
-		{
-			name:      "rocky omits minor version",
-			osName:    "rocky",
-			osVersion: "9.5",
-			expected:  "rocky9",
-		},
-		{
-			name:      "ol omits minor version",
-			osName:    "ol",
-			osVersion: "9.5",
-			expected:  "ol9",
-		},
-		{
-			name:      "ubuntu preserves full version",
-			osName:    "ubuntu",
-			osVersion: "24.04",
-			expected:  "ubuntu24.04",
-		},
-		{
-			name:      "sles preserves dotted version",
-			osName:    "sles",
-			osVersion: "15.6",
-			expected:  "sles15.6",
-		},
-		{
-			name:      "sles preserves service-pack version",
-			osName:    "sles",
-			osVersion: "15-SP6",
-			expected:  "sles15-SP6",
-		},
-		{
-			name:      "sl-micro preserves dotted version",
-			osName:    "sl-micro",
-			osVersion: "6.0",
-			expected:  "sl-micro6.0",
-		},
-		{
-			name:      "archlinux preserves rolling version",
-			osName:    "archlinux",
-			osVersion: "rolling",
-			expected:  "archlinuxrolling",
-		},
+// Snapshotting on test entry would be unsafe: getEffectiveStateLabels edits the nested maps in
+// place, so an earlier test may already have corrupted them. Package init is the only point
+// guaranteed to run first.
+var pristineGPUStateLabels = deepCopyStateLabels(gpuStateLabels)
+
+func deepCopyStateLabels(source map[string]map[string]string) map[string]map[string]string {
+	copiedStateLabels := make(map[string]map[string]string, len(source))
+	for config, stateLabels := range source {
+		copiedStateLabels[config] = maps.Clone(stateLabels)
 	}
+	return copiedStateLabels
+}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
+func isolateGPUStateLabels(t *testing.T) {
+	t.Helper()
+	resetGPUStateLabels()
+	t.Cleanup(resetGPUStateLabels)
+}
 
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "gpu-node-1",
-					Labels: map[string]string{
-						commonGPULabelKey:      commonGPULabelValue,
-						nfdOSReleaseIDLabelKey: tc.osName,
-						nfdOSVersionIDLabelKey: tc.osVersion,
-					},
-				},
-			}
-
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-			controller := ClusterPolicyController{ctx: context.Background(), client: client}
-
-			osName, osTag, err := controller.getGPUNodeOSInfo()
-			if tc.expectError {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tc.errorContainsText)
-				return
-			}
-
-			require.NoError(t, err)
-			require.Equal(t, tc.osName, osName)
-			require.Equal(t, tc.expected, osTag)
-		})
+func resetGPUStateLabels() {
+	for config := range gpuStateLabels {
+		if _, isPristine := pristineGPUStateLabels[config]; !isPristine {
+			delete(gpuStateLabels, config)
+		}
+	}
+	for config, stateLabels := range pristineGPUStateLabels {
+		gpuStateLabels[config] = maps.Clone(stateLabels)
 	}
 }
 
+// ClusterPolicyController.init reassigns this global from Spec.SandboxWorkloads.DefaultWorkload.
+var pristineDefaultGPUWorkloadConfig = defaultGPUWorkloadConfig
+
+func isolateDefaultGPUWorkloadConfig(t *testing.T) {
+	t.Helper()
+	defaultGPUWorkloadConfig = pristineDefaultGPUWorkloadConfig
+	t.Cleanup(func() { defaultGPUWorkloadConfig = pristineDefaultGPUWorkloadConfig })
+}
+
+// setPodSecurityLabelsForNamespace and ocpEnsureNamespaceMonitoring read the package-level
+// clusterPolicyCtrl, not their receiver, so setting only the receiver exercises nothing. The
+// two are the same object in production, making this a testability constraint, not a live bug.
+func withOperatorNamespace(t *testing.T, namespace string) {
+	t.Helper()
+	previousNamespace := clusterPolicyCtrl.operatorNamespace
+	clusterPolicyCtrl.operatorNamespace = namespace
+	t.Cleanup(func() { clusterPolicyCtrl.operatorNamespace = previousNamespace })
+}
+
+func newTestScheme(t *testing.T, addToSchemeFuncs ...func(*runtime.Scheme) error) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	for _, addToScheme := range addToSchemeFuncs {
+		require.NoError(t, addToScheme(scheme))
+	}
+	return scheme
+}
+
+func asClientObjects[T ctrlclient.Object](objects ...T) []ctrlclient.Object {
+	clientObjects := make([]ctrlclient.Object, 0, len(objects))
+	for _, object := range objects {
+		clientObjects = append(clientObjects, object)
+	}
+	return clientObjects
+}
+
+func newCoreV1Client(t *testing.T, interceptors interceptor.Funcs, objects ...ctrlclient.Object) ctrlclient.Client {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(newTestScheme(t)).
+		WithInterceptorFuncs(interceptors).
+		WithObjects(objects...).
+		Build()
+}
+
+func newNodeClient(t *testing.T, interceptors interceptor.Funcs, nodes ...*corev1.Node) ctrlclient.Client {
+	t.Helper()
+	return newCoreV1Client(t, interceptors, asClientObjects(nodes...)...)
+}
+
+func newClusterPolicyController(client ctrlclient.Client) ClusterPolicyController {
+	return ClusterPolicyController{ctx: context.Background(), client: client, logger: logr.Discard()}
+}
+
+func newNamespace(name string, labels map[string]string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+}
+
+func gpuNodeWithOSLabels(name, osRelease, osVersion string) *corev1.Node {
+	return nodeWithLabels(name, map[string]string{
+		commonGPULabelKey:      commonGPULabelValue,
+		nfdOSReleaseIDLabelKey: osRelease,
+		nfdOSVersionIDLabelKey: osVersion,
+	})
+}
+
+func getNamespace(t *testing.T, client ctrlclient.Client, name string) *corev1.Namespace {
+	t.Helper()
+	storedNamespace := &corev1.Namespace{}
+	require.NoError(t, client.Get(context.Background(), ctrlclient.ObjectKey{Name: name}, storedNamespace))
+	return storedNamespace
+}
+
+// Spelled out rather than built from podSecurityModes and podSecurityLabelPrefix: deriving the
+// expectation from the same constants the production loop reads would make it self-referential,
+// and every one of those constants is an upstream Kubernetes Pod Security Admission name that
+// the operator does not get to redefine.
+func managedPodSecurityLabels() map[string]string {
+	return map[string]string{
+		"pod-security.kubernetes.io/enforce": "privileged",
+		"pod-security.kubernetes.io/audit":   "privileged",
+		"pod-security.kubernetes.io/warn":    "privileged",
+	}
+}
+
+func requirePrivilegedPodSecurityLabels(t *testing.T, namespace *corev1.Namespace) {
+	t.Helper()
+	require.Subset(t, namespace.Labels, managedPodSecurityLabels())
+}
+
+// Embeds a working client rather than a nil one: a caller reaching for any method other than
+// List would otherwise nil-panic instead of reporting what it tried to do.
 type errorListClient struct {
 	ctrlclient.Client
 	err error
 }
 
-func (c errorListClient) List(ctx context.Context, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
+func newErrorListClient(t *testing.T, err error) errorListClient {
+	t.Helper()
+	return errorListClient{Client: newCoreV1Client(t, interceptor.Funcs{}), err: err}
+}
+
+func (c errorListClient) List(_ context.Context, _ ctrlclient.ObjectList, _ ...ctrlclient.ListOption) error {
 	return c.err
 }
 
-func TestGetGPUNodeOSInfoListError(t *testing.T) {
-	expectedErr := errors.New("list failed")
-	controller := ClusterPolicyController{
-		ctx:    context.Background(),
-		client: errorListClient{err: expectedErr},
+// Delegates rather than swallowing the Patch: a test that re-reads the object afterwards would
+// otherwise assert against state no write could ever change.
+func failTestOnPatch(t *testing.T) interceptor.Funcs {
+	return interceptor.Funcs{
+		Patch: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
+			t.Errorf("unexpected Patch of %q; the caller should have returned before writing", obj.GetName())
+			return c.Patch(ctx, obj, patch, opts...)
+		},
 	}
-
-	osName, osTag, err := controller.getGPUNodeOSInfo()
-	require.ErrorIs(t, err, expectedErr)
-	require.Empty(t, osName)
-	require.Empty(t, osTag)
-	require.Contains(t, err.Error(), "unable to list nodes with GPU present")
 }
 
-func TestStep(t *testing.T) {
-	expectedErr := errors.New("step failed")
-	driverCRDPolicy := &gpuv1.ClusterPolicy{
-		Spec: gpuv1.ClusterPolicySpec{
-			Driver: gpuv1.DriverSpec{UseNvidiaDriverCRD: new(true)},
+// Delegates rather than swallowing the Get, which would hand the caller a zero-valued object
+// and turn a reported failure into a downstream nil-map panic.
+func failTestOnGet(t *testing.T) interceptor.Funcs {
+	return interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			t.Errorf("unexpected Get of %q; the caller should have returned before reading", key.Name)
+			return c.Get(ctx, key, obj, opts...)
 		},
 	}
+}
 
-	testCases := []struct {
-		name           string
-		controller     ClusterPolicyController
-		expectedStatus gpuv1.State
-		expectedIndex  int
-		expectedError  error
-	}{
-		{
-			name: "normal state advances on success",
-			controller: ClusterPolicyController{
-				controls:   []controlFunc{{func(ClusterPolicyController) (gpuv1.State, error) { return gpuv1.Ready, nil }}},
-				stateNames: []string{"test-state"},
-			},
-			expectedStatus: gpuv1.Ready,
-			expectedIndex:  1,
-		},
-		{
-			name: "normal state does not advance on error",
-			controller: ClusterPolicyController{
-				controls:   []controlFunc{{func(ClusterPolicyController) (gpuv1.State, error) { return gpuv1.NotReady, expectedErr }}},
-				stateNames: []string{"test-state"},
-			},
-			expectedStatus: gpuv1.NotReady,
-			expectedIndex:  0,
-			expectedError:  expectedErr,
-		},
-		{
-			name: "driver cleanup advances on success",
-			controller: ClusterPolicyController{
-				ctx:        context.Background(),
-				client:     errorListClient{},
-				singleton:  driverCRDPolicy,
-				stateNames: []string{"state-driver"},
-			},
-			expectedStatus: gpuv1.Disabled,
-			expectedIndex:  1,
-		},
-		{
-			name: "driver cleanup does not advance on error",
-			controller: ClusterPolicyController{
-				ctx:        context.Background(),
-				client:     errorListClient{err: expectedErr},
-				singleton:  driverCRDPolicy,
-				stateNames: []string{"state-driver"},
-			},
-			expectedStatus: gpuv1.NotReady,
-			expectedIndex:  0,
-			expectedError:  expectedErr,
+func failPatch(err error) interceptor.Funcs {
+	return interceptor.Funcs{
+		Patch: func(_ context.Context, _ ctrlclient.WithWatch, _ ctrlclient.Object, _ ctrlclient.Patch, _ ...ctrlclient.PatchOption) error {
+			return err
 		},
 	}
+}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			status, err := tc.controller.step()
+func failGet(err error) interceptor.Funcs {
+	return interceptor.Funcs{
+		Get: func(_ context.Context, _ ctrlclient.WithWatch, _ ctrlclient.ObjectKey, _ ctrlclient.Object, _ ...ctrlclient.GetOption) error {
+			return err
+		},
+	}
+}
 
-			if tc.expectedError != nil {
-				require.ErrorIs(t, err, tc.expectedError)
-			} else {
-				require.NoError(t, err)
+func failImageStreamGet(err error) interceptor.Funcs {
+	return interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if _, isImageStream := obj.(*apiimagev1.ImageStream); isImageStream {
+				return err
 			}
-			require.Equal(t, tc.expectedStatus, status)
-			require.Equal(t, tc.expectedIndex, tc.controller.idx)
-		})
+			return c.Get(ctx, key, obj, opts...)
+		},
 	}
 }
 
-func TestGetGPUNodeOSInfoNoGPUNodes(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	controller := ClusterPolicyController{ctx: context.Background(), client: client}
-
-	osName, osTag, err := controller.getGPUNodeOSInfo()
-	require.Error(t, err)
-	require.Empty(t, osName)
-	require.Empty(t, osTag)
-	require.Contains(t, err.Error(), "no nodes found with GPU present")
+// Exists because prometheus/testutil is not vendored, and vendoring it would add a non-test
+// file to a tests-only change. Mirrors countingCounter in clusterpolicy_controller_test.go.
+type recordingGauge struct {
+	promcli.Gauge
+	t        *testing.T
+	value    float64
+	setCount int
 }
 
-func TestGetGPUNodeOSInfoMissingLabels(t *testing.T) {
-	testCases := []struct {
-		name              string
-		labels            map[string]string
-		errorContainsText string
-	}{
-		{
-			name: "missing OS release label",
-			labels: map[string]string{
-				commonGPULabelKey:      commonGPULabelValue,
-				nfdOSVersionIDLabelKey: "9.4",
-			},
-			errorContainsText: "unable to retrieve OS name",
-		},
-		{
-			name: "missing OS version label",
-			labels: map[string]string{
-				commonGPULabelKey:      commonGPULabelValue,
-				nfdOSReleaseIDLabelKey: "rhel",
-			},
-			errorContainsText: "unable to retrieve OS version",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
-
-			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "gpu-node-1",
-					Labels: tc.labels,
-				},
-			}
-
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-			controller := ClusterPolicyController{ctx: context.Background(), client: client}
-
-			osName, osTag, err := controller.getGPUNodeOSInfo()
-			require.Error(t, err)
-			require.Empty(t, osName)
-			require.Empty(t, osTag)
-			require.Contains(t, err.Error(), tc.errorContainsText)
-		})
-	}
+func (g *recordingGauge) Set(value float64) {
+	g.value = value
+	g.setCount++
+	g.Gauge.Set(value)
 }
 
-func TestGetRuntimeString(t *testing.T) {
-	testCases := []struct {
-		description     string
-		runtimeVer      string
-		expectedRuntime gpuv1.Runtime
-	}{
-		{
-			"containerd",
-			"containerd://1.0.0",
-			gpuv1.Containerd,
-		},
-		{
-			"docker",
-			"docker://1.0.0",
-			gpuv1.Docker,
-		},
-		{
-			"crio",
-			"cri-o://1.0.0",
-			gpuv1.CRIO,
-		},
-		{
-			"unknown",
-			"unknown://1.0.0",
-			"",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
-			node := corev1.Node{
-				Status: corev1.NodeStatus{
-					NodeInfo: corev1.NodeSystemInfo{
-						ContainerRuntimeVersion: tc.runtimeVer,
-					},
-				},
-			}
-			runtime, _ := getRuntimeString(node)
-			// TODO: update to use require pkg after MR !311 is merged
-			if runtime != tc.expectedRuntime {
-				t.Errorf("expected %s but got %s", tc.expectedRuntime.String(), runtime.String())
-			}
-		})
-	}
+// Only Set feeds value and setCount, so a production switch to any other mutator would slip
+// past every assertion made against them, including the ones asserting a gauge was untouched.
+func (g *recordingGauge) rejectMutator(mutatorName string) {
+	g.t.Errorf("gauge mutated through %s; only Set is recorded, so the assertions would not see it", mutatorName)
 }
 
-func TestIsValidWorkloadConfig(t *testing.T) {
-	tests := []struct {
-		config string
-		want   bool
-	}{
-		{gpuWorkloadConfigContainer, true}, {gpuWorkloadConfigVMPassthrough, true}, {gpuWorkloadConfigVMVgpu, true},
-		{"invalid", false}, {"", false},
-	}
-	for _, tc := range tests {
-		if got := isValidWorkloadConfig(tc.config); got != tc.want {
-			t.Errorf("isValidWorkloadConfig(%q) = %v, want %v", tc.config, got, tc.want)
-		}
-	}
+func (g *recordingGauge) Inc()              { g.rejectMutator("Inc") }
+func (g *recordingGauge) Dec()              { g.rejectMutator("Dec") }
+func (g *recordingGauge) Add(_ float64)     { g.rejectMutator("Add") }
+func (g *recordingGauge) Sub(_ float64)     { g.rejectMutator("Sub") }
+func (g *recordingGauge) SetToCurrentTime() { g.rejectMutator("SetToCurrentTime") }
+
+func newRecordingGauge(t *testing.T) *recordingGauge {
+	t.Helper()
+	return &recordingGauge{Gauge: promcli.NewGauge(promcli.GaugeOpts{}), t: t}
 }
 
-func TestHasOperandsDisabled(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{commonOperandsLabelKey: "false"}, true},
-		{map[string]string{commonOperandsLabelKey: commonOperandsLabelValue}, false},
-		{map[string]string{}, false},
-	}
-	for _, tc := range tests {
-		if got := hasOperandsDisabled(tc.labels); got != tc.want {
-			t.Errorf("hasOperandsDisabled(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
+type stateManagerMetrics struct {
+	operatorMetrics                 *OperatorMetrics
+	gpuNodesTotal                   *recordingGauge
+	driverToolkitEnabled            *recordingGauge
+	driverToolkitImageStreamMissing *recordingGauge
+	driverToolkitNfdTooOld          *recordingGauge
 }
 
-func TestHasNFDLabels(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{nfdLabelPrefix + "cpu": "true"}, true},
-		{map[string]string{"other-label": "value"}, false},
-		{map[string]string{}, false},
+// Deliberately does not call InitOperatorMetrics: that registers into the global
+// controller-runtime registry and panics on a second call per test binary.
+func newStateManagerMetrics(t *testing.T) *stateManagerMetrics {
+	t.Helper()
+	metrics := &stateManagerMetrics{
+		gpuNodesTotal:                   newRecordingGauge(t),
+		driverToolkitEnabled:            newRecordingGauge(t),
+		driverToolkitImageStreamMissing: newRecordingGauge(t),
+		driverToolkitNfdTooOld:          newRecordingGauge(t),
 	}
-	for _, tc := range tests {
-		if got := hasNFDLabels(tc.labels); got != tc.want {
-			t.Errorf("hasNFDLabels(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
+	metrics.operatorMetrics = &OperatorMetrics{
+		gpuNodesTotal:                   metrics.gpuNodesTotal,
+		openshiftDriverToolkitEnabled:   metrics.driverToolkitEnabled,
+		openshiftDriverToolkitIsMissing: metrics.driverToolkitImageStreamMissing,
+		openshiftDriverToolkitNfdTooOld: metrics.driverToolkitNfdTooOld,
+		// No test asserts this one, but ocpHasDriverToolkitImageStream calls Set on it
+		// whenever the ImageStream is found, and a nil gauge would panic there.
+		openshiftDriverToolkitIsBroken: promcli.NewGauge(promcli.GaugeOpts{}),
 	}
-}
-
-func TestHasMIGManagerLabel(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{migManagerLabelKey: migManagerLabelValue}, true},
-		{map[string]string{"other": "value"}, false},
-	}
-	for _, tc := range tests {
-		if got := hasMIGManagerLabel(tc.labels); got != tc.want {
-			t.Errorf("hasMIGManagerLabel(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
-}
-
-func TestHasCommonGPULabel(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{commonGPULabelKey: commonGPULabelValue}, true},
-		{map[string]string{commonGPULabelKey: "false"}, false},
-		{map[string]string{}, false},
-	}
-	for _, tc := range tests {
-		if got := hasCommonGPULabel(tc.labels); got != tc.want {
-			t.Errorf("hasCommonGPULabel(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
-}
-
-func TestHasGPULabels(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{nfdLabelPrefix + "pci-10de.present": "true"}, true},
-		{map[string]string{nfdLabelPrefix + "pci-0302_10de.present": "true"}, true},
-		{map[string]string{nfdLabelPrefix + "pci-0300_10de.present": "true"}, true},
-		{map[string]string{nfdLabelPrefix + "pci-10de.present": "false"}, false},
-		{map[string]string{"other": "true"}, false},
-	}
-	for _, tc := range tests {
-		if got := hasGPULabels(tc.labels); got != tc.want {
-			t.Errorf("hasGPULabels(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
-}
-
-func TestHasMIGCapableGPU(t *testing.T) {
-	tests := []struct {
-		labels map[string]string
-		want   bool
-	}{
-		{map[string]string{migCapableLabelKey: migCapableLabelValue}, true},
-		{map[string]string{migCapableLabelKey: "false"}, false},
-		{map[string]string{gpuProductLabelKey: "NVIDIA-A100"}, true},
-		{map[string]string{gpuProductLabelKey: "NVIDIA-H100"}, true},
-		{map[string]string{gpuProductLabelKey: "NVIDIA-A30"}, true},
-		{map[string]string{gpuProductLabelKey: "NVIDIA-T4"}, false},
-		{map[string]string{vgpuHostDriverLabelKey: "535.54"}, false},
-		{map[string]string{}, false},
-	}
-	for _, tc := range tests {
-		if got := hasMIGCapableGPU(tc.labels); got != tc.want {
-			t.Errorf("hasMIGCapableGPU(%v) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
-}
-
-func TestValidateClusterPolicySpec(t *testing.T) {
-	tests := []struct {
-		description string
-		spec        *gpuv1.ClusterPolicySpec
-		err         error
-	}{
-		{
-			description: "valid CDI object in spec",
-			spec: &gpuv1.ClusterPolicySpec{
-				CDI: gpuv1.CDIConfigSpec{
-					Enabled:          new(true),
-					NRIPluginEnabled: new(true),
-				},
-			},
-		},
-		{
-			description: "invalid CDI object in spec",
-			spec: &gpuv1.ClusterPolicySpec{
-				CDI: gpuv1.CDIConfigSpec{
-					Enabled:          new(false),
-					NRIPluginEnabled: new(true),
-				},
-			},
-			err: errors.New("the NRI Plugin cannot be enabled when CDI is disabled"),
-		},
-		{
-			description: "invalid CDI and Toolkit config combination",
-			spec: &gpuv1.ClusterPolicySpec{
-				CDI: gpuv1.CDIConfigSpec{
-					Enabled:          new(true),
-					NRIPluginEnabled: new(true),
-				},
-				Toolkit: gpuv1.ToolkitSpec{
-					Enabled: new(false),
-				},
-			},
-			err: errors.New("the NRI Plugin cannot be enabled when the Container Toolkit is disabled"),
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.description, func(t *testing.T) {
-			err := validateClusterPolicySpec(tc.spec)
-			if tc.err == nil {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-				require.Equal(t, tc.err.Error(), err.Error())
-			}
-		})
-	}
-}
-
-func TestGetEffectiveStateLabels(t *testing.T) {
-	// getEffectiveStateLabels returns labels for workload config and sandbox mode.
-	// For container and vm-vgpu, mode has no effect. For vm-passthrough, mode selects
-	// sandbox-device-plugin (kubevirt) vs kata-device-plugin (kata).
-	t.Run("container", func(t *testing.T) {
-		got := getEffectiveStateLabels(gpuWorkloadConfigContainer, "kubevirt")
-		require.NotNil(t, got)
-		require.Contains(t, got, "nvidia.com/gpu.deploy.device-plugin")
-		require.Equal(t, "true", got["nvidia.com/gpu.deploy.device-plugin"])
-	})
-	t.Run("vm-vgpu", func(t *testing.T) {
-		got := getEffectiveStateLabels(gpuWorkloadConfigVMVgpu, "kata")
-		require.NotNil(t, got)
-		require.Contains(t, got, "nvidia.com/gpu.deploy.sandbox-device-plugin")
-		require.Equal(t, "true", got["nvidia.com/gpu.deploy.sandbox-device-plugin"])
-	})
-	// vm-passthrough: test kubevirt first (map has sandbox-device-plugin), then kata.
-	t.Run("vm-passthrough-kubevirt", func(t *testing.T) {
-		got := getEffectiveStateLabels(gpuWorkloadConfigVMPassthrough, string(gpuv1.KubeVirt))
-		require.NotNil(t, got)
-		require.Contains(t, got, kubevirtDevicePluginDeployLabelKey)
-		require.Equal(t, "true", got[kubevirtDevicePluginDeployLabelKey])
-		require.NotContains(t, got, kataDevicePluginDeployLabelKey)
-	})
-	t.Run("vm-passthrough-kata", func(t *testing.T) {
-		got := getEffectiveStateLabels(gpuWorkloadConfigVMPassthrough, string(gpuv1.Kata))
-		require.NotNil(t, got)
-		require.Contains(t, got, kataDevicePluginDeployLabelKey)
-		require.Equal(t, "true", got[kataDevicePluginDeployLabelKey])
-		require.NotContains(t, got, kubevirtDevicePluginDeployLabelKey)
-	})
-	t.Run("invalid config", func(t *testing.T) {
-		got := getEffectiveStateLabels("invalid", "kubevirt")
-		require.Nil(t, got)
-	})
-}
-
-func TestRemoveAllGPUStateLabels(t *testing.T) {
-	// removeAllGPUStateLabels removes all gpuStateLabels keys plus kata-device-plugin and mig-manager.
-	t.Run("removes kata device plugin label", func(t *testing.T) {
-		labels := map[string]string{
-			kataDevicePluginDeployLabelKey: "true",
-			"other":                        "keep",
-		}
-		modified := removeAllGPUStateLabels(labels)
-		require.True(t, modified)
-		require.NotContains(t, labels, kataDevicePluginDeployLabelKey)
-		require.Equal(t, "keep", labels["other"])
-	})
-	t.Run("removes sandbox deploy label", func(t *testing.T) {
-		labels := map[string]string{
-			kubevirtDevicePluginDeployLabelKey: "true",
-		}
-		modified := removeAllGPUStateLabels(labels)
-		require.True(t, modified)
-		require.Empty(t, labels[kubevirtDevicePluginDeployLabelKey])
-	})
-	t.Run("removes GPUCluster deploy labels", func(t *testing.T) {
-		labels := map[string]string{
-			driverDeployLabelKey:       "true",
-			draDriverDeployLabelKey:    "true",
-			draValidatorDeployLabelKey: "true",
-			gfdDeployLabelKey:          "true",
-			dcgmDeployLabelKey:         "true",
-			dcgmExporterDeployLabelKey: "true",
-			"other":                    "keep",
-		}
-		modified := removeAllGPUStateLabels(labels)
-		require.True(t, modified)
-		require.Equal(t, map[string]string{"other": "keep"}, labels)
-	})
-	t.Run("nothing to remove", func(t *testing.T) {
-		labels := map[string]string{"kubernetes.io/hostname": "plain"}
-		modified := removeAllGPUStateLabels(labels)
-		require.False(t, modified)
-		require.Equal(t, map[string]string{"kubernetes.io/hostname": "plain"}, labels)
-	})
-}
-
-func TestIsStateEnabled_SandboxAndKataDevicePlugin(t *testing.T) {
-	boolTrue := new(true)
-	boolFalse := new(false)
-	tests := []struct {
-		name           string
-		sandboxEnabled bool
-		spec           gpuv1.ClusterPolicySpec
-		stateName      string
-		wantEnabled    bool
-	}{
-		{
-			name:           "state-sandbox-device-plugin enabled when sandbox+plugin+mode kubevirt",
-			sandboxEnabled: true,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:    gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kubevirt"},
-				SandboxDevicePlugin: gpuv1.SandboxDevicePluginSpec{Enabled: boolTrue},
-			},
-			stateName:   "state-sandbox-device-plugin",
-			wantEnabled: true,
-		},
-		{
-			name:           "state-sandbox-device-plugin disabled when mode kata",
-			sandboxEnabled: true,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:    gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kata"},
-				SandboxDevicePlugin: gpuv1.SandboxDevicePluginSpec{Enabled: boolTrue},
-			},
-			stateName:   "state-sandbox-device-plugin",
-			wantEnabled: false,
-		},
-		{
-			name:           "state-kata-device-plugin enabled when sandbox+kata plugin+mode kata",
-			sandboxEnabled: true,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:        gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kata"},
-				KataSandboxDevicePlugin: gpuv1.KataDevicePluginSpec{ComponentCommonSpec: gpuv1.ComponentCommonSpec{Enabled: boolTrue}},
-			},
-			stateName:   "state-kata-device-plugin",
-			wantEnabled: true,
-		},
-		{
-			name:           "state-kata-device-plugin disabled when mode kubevirt",
-			sandboxEnabled: true,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:        gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kubevirt"},
-				KataSandboxDevicePlugin: gpuv1.KataDevicePluginSpec{ComponentCommonSpec: gpuv1.ComponentCommonSpec{Enabled: boolTrue}},
-			},
-			stateName:   "state-kata-device-plugin",
-			wantEnabled: false,
-		},
-		{
-			name:           "state-kata-device-plugin disabled when KataSandboxDevicePlugin.Enabled false",
-			sandboxEnabled: true,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:        gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kata"},
-				KataSandboxDevicePlugin: gpuv1.KataDevicePluginSpec{ComponentCommonSpec: gpuv1.ComponentCommonSpec{Enabled: boolFalse}},
-			},
-			stateName:   "state-kata-device-plugin",
-			wantEnabled: false,
-		},
-		{
-			name:           "state-kata-device-plugin disabled when sandbox workloads disabled",
-			sandboxEnabled: false,
-			spec: gpuv1.ClusterPolicySpec{
-				SandboxWorkloads:        gpuv1.SandboxWorkloadsSpec{Enabled: boolTrue, Mode: "kata"},
-				KataSandboxDevicePlugin: gpuv1.KataDevicePluginSpec{ComponentCommonSpec: gpuv1.ComponentCommonSpec{Enabled: boolTrue}},
-			},
-			stateName:   "state-kata-device-plugin",
-			wantEnabled: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			n := ClusterPolicyController{
-				singleton:      &gpuv1.ClusterPolicy{Spec: tc.spec},
-				sandboxEnabled: tc.sandboxEnabled,
-			}
-			got := n.isStateEnabled(tc.stateName)
-			require.Equal(t, tc.wantEnabled, got, "isStateEnabled(%q)", tc.stateName)
-		})
-	}
+	return metrics
 }
