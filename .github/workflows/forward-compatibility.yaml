@@ -63,9 +63,9 @@ jobs:
           # Generate values override file
           .github/scripts/generate-values-overrides.sh \
             values-overrides.yaml \
-            "${TOOLKIT}" \
-            "${DEVICE_PLUGIN}" \
-            "${MIG_MANAGER}"
+            "toolkit=${TOOLKIT}" \
+            "devicePlugin=${DEVICE_PLUGIN}" \
+            "migManager=${MIG_MANAGER}"
 
       - name: Upload values override file
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
