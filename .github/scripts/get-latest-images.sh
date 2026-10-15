@@ -17,8 +17,11 @@ set -euo pipefail
 
 COMPONENT=${1:-}
 
+VALID_COMPONENTS="toolkit, device-plugin, mig-manager, driver-manager, vgpu-device-manager, kata-sandbox-device-plugin, kubevirt-gpu-device-plugin, cc-manager"
+
 if [[ -z "${COMPONENT}" ]]; then
-    echo "Usage: $0 <toolkit|device-plugin|mig-manager>" >&2
+    echo "Usage: $0 <component>" >&2
+    echo "Valid components: ${VALID_COMPONENTS}" >&2
     exit 1
 fi
 
@@ -29,6 +32,8 @@ if ! command -v regctl &> /dev/null; then
 fi
 
 # Map component names to GHCR image repositories and GitHub source repositories
+GITHUB_BRANCH="main"
+TAG_SUFFIX=""
 case "${COMPONENT}" in
     toolkit)
         IMAGE_REPO="ghcr.io/nvidia/container-toolkit"
@@ -42,19 +47,41 @@ case "${COMPONENT}" in
         IMAGE_REPO="ghcr.io/nvidia/k8s-mig-manager"
         GITHUB_REPO="NVIDIA/mig-parted"
         ;;
+    driver-manager)
+        IMAGE_REPO="ghcr.io/nvidia/k8s-driver-manager"
+        GITHUB_REPO="NVIDIA/k8s-driver-manager"
+        ;;
+    vgpu-device-manager)
+        IMAGE_REPO="ghcr.io/nvidia/vgpu-device-manager"
+        GITHUB_REPO="NVIDIA/vgpu-device-manager"
+        ;;
+    kata-sandbox-device-plugin)
+        IMAGE_REPO="ghcr.io/nvidia/nvidia-sandbox-device-plugin"
+        GITHUB_REPO="NVIDIA/sandbox-device-plugin"
+        ;;
+    kubevirt-gpu-device-plugin)
+        IMAGE_REPO="ghcr.io/nvidia/kubevirt-gpu-device-plugin"
+        GITHUB_REPO="NVIDIA/kubevirt-gpu-device-plugin"
+        GITHUB_BRANCH="master"
+        ;;
+    cc-manager)
+        IMAGE_REPO="ghcr.io/nvidia/k8s-cc-manager"
+        GITHUB_REPO="NVIDIA/k8s-cc-manager"
+        TAG_SUFFIX="-distroless"
+        ;;
     *)
         echo "Error: Unknown component '${COMPONENT}'" >&2
-        echo "Valid components: toolkit, device-plugin, mig-manager" >&2
+        echo "Valid components: ${VALID_COMPONENTS}" >&2
         exit 1
         ;;
 esac
 
-echo "Fetching latest commit from ${GITHUB_REPO}..." >&2
+echo "Fetching latest commit from ${GITHUB_REPO}@${GITHUB_BRANCH}..." >&2
 
-# Get the latest commit SHA from the main branch using GitHub API.
+# Get the latest commit SHA from the branch using GitHub API.
 # NOTE: We use 8-char truncated SHAs as image tags. This must match the
 # tag convention used by each component's CI pipeline when publishing images.
-GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/commits/main"
+GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}/commits/${GITHUB_BRANCH}"
 
 # Use GITHUB_TOKEN if available for authentication (higher rate limits)
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -77,8 +104,7 @@ fi
 
 echo "Latest commit SHA: ${LATEST_COMMIT}" >&2
 
-# Construct full image path with commit tag
-FULL_IMAGE="${IMAGE_REPO}:${LATEST_COMMIT}"
+FULL_IMAGE="${IMAGE_REPO}:${LATEST_COMMIT}${TAG_SUFFIX}"
 
 echo "Verifying image exists: ${FULL_IMAGE}" >&2
 
