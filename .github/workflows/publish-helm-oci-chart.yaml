@@ -23,6 +23,11 @@ on:
       operator_version:
         required: true
         type: string
+      main_chart_version:
+        required: false
+        type: string
+        default: ''
+        description: "Bake the values-overrides artifact into the chart and publish it with this 0.0.0-main version instead of the per-commit one"
     outputs:
       chart_reference:
         description: "The OCI reference of the published Helm chart"
@@ -67,6 +72,17 @@ jobs:
         with:
           cmd: yq -i '.operator.repository = env(OPERATOR_REPOSITORY) | .validator.repository = env(OPERATOR_REPOSITORY)' deployments/gpu-operator/values.yaml
 
+      - name: Download values override file
+        if: ${{ inputs.main_chart_version != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: values-overrides
+          path: ${{ github.workspace }}
+
+      - name: Apply values override file
+        if: ${{ inputs.main_chart_version != '' }}
+        run: .github/scripts/apply-values-overrides.sh deployments/gpu-operator values-overrides.yaml
+
       - name: Login to GitHub Container Registry
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,12 +92,17 @@ jobs:
         id: package
         env:
           OPERATOR_VERSION: ${{ inputs.operator_version }}
+          MAIN_CHART_VERSION: ${{ inputs.main_chart_version }}
         run: |
           set -euo pipefail
 
-          # Helm chart versions must be SemVer. Prefix the image version so a
-          # numeric short SHA with a leading zero remains a valid prerelease.
-          CHART_VERSION="0.0.0-git-${OPERATOR_VERSION}"
+          if [[ -n "${MAIN_CHART_VERSION}" ]]; then
+            CHART_VERSION="${MAIN_CHART_VERSION}"
+          else
+            # Helm chart versions must be SemVer. Prefix the image version so a
+            # numeric short SHA with a leading zero remains a valid prerelease.
+            CHART_VERSION="0.0.0-git-${OPERATOR_VERSION}"
+          fi
 
           mkdir -p dist
           helm lint deployments/gpu-operator
