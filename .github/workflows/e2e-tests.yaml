@@ -28,6 +28,16 @@ on:
         type: boolean
         default: false
         description: 'Use values-overrides artifact for component image configuration'
+      chart_reference:
+        description: 'Published Helm chart to test instead of publishing one from this commit (set chart_version, and operator_version to its appVersion)'
+        required: false
+        type: string
+        default: ''
+      chart_version:
+        description: 'Version of chart_reference'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
@@ -54,6 +64,16 @@ on:
         required: false
         type: boolean
         default: false
+      chart_reference:
+        description: 'Published Helm chart to test instead of publishing one from this commit (set chart_version, and operator_version to its appVersion)'
+        required: false
+        type: string
+        default: ''
+      chart_version:
+        description: 'Version of chart_reference'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -67,6 +87,7 @@ jobs:
 
   publish-helm-oci-chart:
     needs: [variables]
+    if: ${{ !inputs.chart_reference }}
     permissions:
       contents: read
       packages: write
@@ -77,11 +98,15 @@ jobs:
 
   e2e-tests-containerd:
     needs: [variables, publish-helm-oci-chart]
+    if: ${{ !cancelled() && needs.variables.result == 'success' && (needs.publish-helm-oci-chart.result == 'success' || needs.publish-helm-oci-chart.result == 'skipped') }}
     runs-on: linux-amd64-cpu4
     timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
+    env:
+      HELM_CHART: ${{ inputs.chart_reference || needs.publish-helm-oci-chart.outputs.chart_reference }}
+      HELM_CHART_VERSION: ${{ inputs.chart_reference && inputs.chart_version || needs.publish-helm-oci-chart.outputs.chart_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         name: Check out code
@@ -97,9 +122,25 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Verify the published Helm chart is available
         env:
-          HELM_CHART: ${{ needs.publish-helm-oci-chart.outputs.chart_reference }}
-          HELM_CHART_VERSION: ${{ needs.publish-helm-oci-chart.outputs.chart_version }}
-        run: helm show chart "${HELM_CHART}" --version "${HELM_CHART_VERSION}"
+          INPUT_CHART_REFERENCE: ${{ inputs.chart_reference }}
+          INPUT_CHART_VERSION: ${{ inputs.chart_version }}
+          OPERATOR_VERSION: ${{ needs.variables.outputs.operator_version }}
+        run: |
+          if [[ -n "${INPUT_CHART_VERSION}" && -z "${INPUT_CHART_REFERENCE}" ]]; then
+            echo "::error::chart_version requires chart_reference"
+            exit 1
+          fi
+          if [[ -z "${HELM_CHART_VERSION}" ]]; then
+            echo "::error::chart_reference requires chart_version"
+            exit 1
+          fi
+          CHART_METADATA=$(helm show chart "${HELM_CHART}" --version "${HELM_CHART_VERSION}")
+          echo "${CHART_METADATA}"
+          CHART_APP_VERSION=$(awk '/^appVersion:/ {print $2}' <<< "${CHART_METADATA}" | tr -d '"')
+          if [[ -n "${INPUT_CHART_REFERENCE}" && "${CHART_APP_VERSION}" != "${OPERATOR_VERSION}" ]]; then
+            echo "::error::operator_version ${OPERATOR_VERSION} does not match the chart's appVersion ${CHART_APP_VERSION}"
+            exit 1
+          fi
       - name: Set up Holodeck
         uses: NVIDIA/holodeck@e0f3932cf284d92421a55536839fa821a14116aa # v0.3.7
         with:
@@ -134,8 +175,6 @@ jobs:
         env:
           OPERATOR_VERSION: ${{ needs.variables.outputs.operator_version }}
           OPERATOR_IMAGE: ${{ needs.variables.outputs.operator_image }}
-          HELM_CHART: ${{ needs.publish-helm-oci-chart.outputs.chart_reference }}
-          HELM_CHART_VERSION: ${{ needs.publish-helm-oci-chart.outputs.chart_version }}
           GPU_PRODUCT_NAME: "Tesla-T4"
           SKIP_LAUNCH: "true"
           CONTAINER_RUNTIME: "containerd"
@@ -154,11 +193,15 @@ jobs:
 
   e2e-tests-nvidiadriver:
     needs: [variables, publish-helm-oci-chart]
+    if: ${{ !cancelled() && needs.variables.result == 'success' && (needs.publish-helm-oci-chart.result == 'success' || needs.publish-helm-oci-chart.result == 'skipped') }}
     runs-on: linux-amd64-cpu4
     timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
+    env:
+      HELM_CHART: ${{ inputs.chart_reference || needs.publish-helm-oci-chart.outputs.chart_reference }}
+      HELM_CHART_VERSION: ${{ inputs.chart_reference && inputs.chart_version || needs.publish-helm-oci-chart.outputs.chart_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         name: Check out code
@@ -174,9 +217,25 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Verify the published Helm chart is available
         env:
-          HELM_CHART: ${{ needs.publish-helm-oci-chart.outputs.chart_reference }}
-          HELM_CHART_VERSION: ${{ needs.publish-helm-oci-chart.outputs.chart_version }}
-        run: helm show chart "${HELM_CHART}" --version "${HELM_CHART_VERSION}"
+          INPUT_CHART_REFERENCE: ${{ inputs.chart_reference }}
+          INPUT_CHART_VERSION: ${{ inputs.chart_version }}
+          OPERATOR_VERSION: ${{ needs.variables.outputs.operator_version }}
+        run: |
+          if [[ -n "${INPUT_CHART_VERSION}" && -z "${INPUT_CHART_REFERENCE}" ]]; then
+            echo "::error::chart_version requires chart_reference"
+            exit 1
+          fi
+          if [[ -z "${HELM_CHART_VERSION}" ]]; then
+            echo "::error::chart_reference requires chart_version"
+            exit 1
+          fi
+          CHART_METADATA=$(helm show chart "${HELM_CHART}" --version "${HELM_CHART_VERSION}")
+          echo "${CHART_METADATA}"
+          CHART_APP_VERSION=$(awk '/^appVersion:/ {print $2}' <<< "${CHART_METADATA}" | tr -d '"')
+          if [[ -n "${INPUT_CHART_REFERENCE}" && "${CHART_APP_VERSION}" != "${OPERATOR_VERSION}" ]]; then
+            echo "::error::operator_version ${OPERATOR_VERSION} does not match the chart's appVersion ${CHART_APP_VERSION}"
+            exit 1
+          fi
       - name: Set up Holodeck
         uses: NVIDIA/holodeck@e0f3932cf284d92421a55536839fa821a14116aa # v0.3.7
         with:
@@ -211,8 +270,6 @@ jobs:
         env:
           OPERATOR_VERSION: ${{ needs.variables.outputs.operator_version }}
           OPERATOR_IMAGE: ${{ needs.variables.outputs.operator_image }}
-          HELM_CHART: ${{ needs.publish-helm-oci-chart.outputs.chart_reference }}
-          HELM_CHART_VERSION: ${{ needs.publish-helm-oci-chart.outputs.chart_version }}
           GPU_PRODUCT_NAME: "Tesla-T4"
           SKIP_LAUNCH: "true"
           CONTAINER_RUNTIME: "containerd"
