@@ -190,6 +190,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      bundle_image: ${{ steps.bundle.outputs.bundle_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -285,6 +287,7 @@ jobs:
           make validate-csv
 
       - name: Build and push OLM bundle image
+        id: bundle
         env:
           MAIN_VERSION: ${{ needs.prepare-main-values.outputs.main_version }}
           GH_REPOSITORY: ${{ github.repository }}
@@ -298,14 +301,103 @@ jobs:
           REPOSITORY="$(echo "${GH_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
           BUNDLE_IMAGE="ghcr.io/${REPOSITORY}/gpu-operator-bundle:${MAIN_VERSION}"
           make build-bundle-image DOCKER="docker buildx" BUNDLE_IMAGE="${BUNDLE_IMAGE}"
+          echo "bundle_image=${BUNDLE_IMAGE}" >> "${GITHUB_OUTPUT}"
           echo "::notice::Published OLM bundle image ${BUNDLE_IMAGE}"
+
+  record-main-build:
+    needs: [variables, prepare-main-values, publish-main-chart, publish-main-bundle]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Get regctl version
+        run: |
+          REGCTL_VERSION=$(grep "REGCTL_VERSION ?=" versions.mk)
+          echo "REGCTL_VERSION=${REGCTL_VERSION##REGCTL_VERSION ?= }" >> "${GITHUB_ENV}"
+
+      - name: Install regctl
+        uses: regclient/actions/regctl-installer@148669fe4b19151fcab6e00c6df2db43b9e2b097
+        with:
+          release: ${{ env.REGCTL_VERSION }}
+
+      - name: Login to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GH_TOKEN}" | regctl registry login ghcr.io -u "${GITHUB_ACTOR}" --pass-stdin
+
+      - name: Download values override file and merged chart values
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: main-values
+          path: ${{ github.workspace }}
+
+      - name: Push the main build record
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          MAIN_VERSION: ${{ needs.prepare-main-values.outputs.main_version }}
+          OPERATOR_IMAGE: ${{ needs.variables.outputs.operator_image }}
+          OPERATOR_VERSION: ${{ needs.variables.outputs.operator_version }}
+          CHART_REFERENCE: ${{ needs.publish-main-chart.outputs.chart_reference }}
+          CHART_VERSION: ${{ needs.publish-main-chart.outputs.chart_version }}
+          BUNDLE_IMAGE: ${{ needs.publish-main-bundle.outputs.bundle_image }}
+        run: |
+          set -euo pipefail
+
+          LOWERCASE_REPO_OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | awk '{print tolower($0)}')
+          MAIN_BUILD_RECORD_REFERENCE="ghcr.io/${LOWERCASE_REPO_OWNER}/gpu-operator/main-builds:${MAIN_VERSION}"
+          TAGGED_CHART_REFERENCE="${CHART_REFERENCE#oci://}:${CHART_VERSION}"
+
+          OPERAND_IMAGES=$(yq '.. | select(tag == "!!map" and has("image")) | .repository + "/" + .image + ":" + .version' values-overrides.yaml)
+          RECORDED_IMAGES=$(printf '%s\n' "${OPERATOR_IMAGE}:${OPERATOR_VERSION}" "${OPERAND_IMAGES}" | sort -u)
+
+          IMAGE_RECORDS="[]"
+          while read -r IMAGE; do
+            IMAGE_DIGEST=$(regctl image digest "${IMAGE}")
+            IMAGE_RECORDS=$(jq -c --arg reference "${IMAGE}" --arg digest "${IMAGE_DIGEST}" '. + [{$reference, $digest}]' <<< "${IMAGE_RECORDS}")
+          done <<< "${RECORDED_IMAGES}"
+
+          CHART_DIGEST=$(regctl image digest "${TAGGED_CHART_REFERENCE}")
+          BUNDLE_DIGEST=$(regctl image digest "${BUNDLE_IMAGE}")
+
+          jq -n \
+            --arg mainVersion "${MAIN_VERSION}" \
+            --arg operatorVersion "${OPERATOR_VERSION}" \
+            --arg sourceCommit "${GITHUB_SHA}" \
+            --arg runUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg chartReference "${TAGGED_CHART_REFERENCE}" \
+            --arg chartDigest "${CHART_DIGEST}" \
+            --arg bundleReference "${BUNDLE_IMAGE}" \
+            --arg bundleDigest "${BUNDLE_DIGEST}" \
+            --argjson images "${IMAGE_RECORDS}" \
+            '{
+              $mainVersion,
+              $operatorVersion,
+              $sourceCommit,
+              $runUrl,
+              chart: {reference: $chartReference, digest: $chartDigest},
+              bundle: {reference: $bundleReference, digest: $bundleDigest},
+              $images
+            }' > main-build.json
+
+          regctl artifact put \
+            --artifact-type application/vnd.nvidia.gpu-operator.main-build.v1+json \
+            --file main-build.json \
+            --file-media-type application/json \
+            "${MAIN_BUILD_RECORD_REFERENCE}"
+          echo "::notice::Recorded main build ${MAIN_BUILD_RECORD_REFERENCE}"
 
   notify-failure:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
-    needs: [variables, prepare-main-values, publish-main-chart, publish-main-bundle]
-    if: ${{ always() && github.event_name == 'schedule' && (needs.variables.result == 'failure' || needs.prepare-main-values.result == 'failure' || needs.publish-main-chart.result == 'failure' || needs.publish-main-bundle.result == 'failure') }}
+    needs: [variables, prepare-main-values, publish-main-chart, publish-main-bundle, record-main-build]
+    if: ${{ always() && github.event_name == 'schedule' && (needs.variables.result == 'failure' || needs.prepare-main-values.result == 'failure' || needs.publish-main-chart.result == 'failure' || needs.publish-main-bundle.result == 'failure' || needs.record-main-build.result == 'failure') }}
     env:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
     steps:
@@ -318,5 +410,5 @@ jobs:
           payload: |
             {
               "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
-              "text": ":x: *GPU Operator Main Chart or Bundle Publish Failed*\n\n*Workflow:* ${{ github.workflow }}\n*Repository:* ${{ github.repository }}\n*Trigger:* ${{ github.event_name }}\n\n*Resolved Images:* ${{ needs.prepare-main-values.outputs.resolved_images || 'not resolved; see the run log' }}\n\n*Details:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Failed Run>\n\n${{ secrets.SLACK_MENTION_LIST }}"
+              "text": ":x: *GPU Operator Main Build Publish Failed*\n\n*Workflow:* ${{ github.workflow }}\n*Repository:* ${{ github.repository }}\n*Trigger:* ${{ github.event_name }}\n\n*Resolved Images:* ${{ needs.prepare-main-values.outputs.resolved_images || 'not resolved; see the run log' }}\n\n*Details:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Failed Run>\n\n${{ secrets.SLACK_MENTION_LIST }}"
             }

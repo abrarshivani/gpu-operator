@@ -26,7 +26,7 @@ concurrency:
 permissions: {}
 
 env:
-  MAIN_CHART_MAX_AGE_HOURS: 48
+  MAIN_BUILD_MAX_AGE_HOURS: 48
 
 jobs:
   variables:
@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      packages: read
     outputs:
       chart_reference: ${{ steps.main-chart.outputs.chart_reference }}
       chart_version: ${{ steps.main-chart.outputs.chart_version }}
@@ -58,7 +59,12 @@ jobs:
         with:
           release: ${{ env.REGCTL_VERSION }}
 
-      - name: Find the newest main chart
+      - name: Login to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GH_TOKEN}" | regctl registry login ghcr.io -u "${GITHUB_ACTOR}" --pass-stdin
+
+      - name: Find the chart of the newest complete main build
         id: main-chart
         env:
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -66,10 +72,11 @@ jobs:
           set -euo pipefail
 
           LOWERCASE_REPO_OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | awk '{print tolower($0)}')
+          MAIN_BUILD_REPOSITORY="ghcr.io/${LOWERCASE_REPO_OWNER}/gpu-operator/main-builds"
           CHART_REPOSITORY="ghcr.io/${LOWERCASE_REPO_OWNER}/gpu-operator/charts/gpu-operator"
 
           {
-            .github/scripts/get-latest-main-chart.sh "${CHART_REPOSITORY}" "${MAIN_CHART_MAX_AGE_HOURS}"
+            .github/scripts/get-latest-main-build.sh "${MAIN_BUILD_REPOSITORY}" "${CHART_REPOSITORY}" "${MAIN_BUILD_MAX_AGE_HOURS}"
             echo "chart_reference=oci://${CHART_REPOSITORY}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -110,7 +117,7 @@ jobs:
           if [[ -n "${CHART_VERSION}" ]]; then
             echo "description=\`${CHART_REFERENCE} --version ${CHART_VERSION}\` (run \`helm show values\` on it to see the component images)" >> "${GITHUB_OUTPUT}"
           else
-            echo "description=No usable main chart from the last ${MAIN_CHART_MAX_AGE_HOURS} hours (none published, or the registry could not be read); see the run log" >> "${GITHUB_OUTPUT}"
+            echo "description=No complete main build from the last ${MAIN_BUILD_MAX_AGE_HOURS} hours (none recorded, its chart changed since, or the registry could not be read); see the run log" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Send Slack alert notification
