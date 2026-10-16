@@ -34,7 +34,7 @@ jobs:
   fetch-latest-images:
     needs: [variables]
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -82,14 +82,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          TOOLKIT_IMAGE=$(.github/scripts/get-latest-images.sh toolkit)
-          DEVICE_PLUGIN_IMAGE=$(.github/scripts/get-latest-images.sh device-plugin)
-          MIG_MANAGER_IMAGE=$(.github/scripts/get-latest-images.sh mig-manager)
-          DRIVER_MANAGER_IMAGE=$(.github/scripts/get-latest-images.sh driver-manager)
-          VGPU_DEVICE_MANAGER_IMAGE=$(.github/scripts/get-latest-images.sh vgpu-device-manager)
-          KATA_SANDBOX_DEVICE_PLUGIN_IMAGE=$(.github/scripts/get-latest-images.sh kata-sandbox-device-plugin)
-          KUBEVIRT_GPU_DEVICE_PLUGIN_IMAGE=$(.github/scripts/get-latest-images.sh kubevirt-gpu-device-plugin)
-          CC_MANAGER_IMAGE=$(.github/scripts/get-latest-images.sh cc-manager)
+          COMPONENTS=(toolkit device-plugin mig-manager driver-manager vgpu-device-manager
+            kata-sandbox-device-plugin kubevirt-gpu-device-plugin cc-manager)
+          IMAGE_LOOKUP_DIR="${RUNNER_TEMP}/image-lookups"
+          mkdir -p "${IMAGE_LOOKUP_DIR}"
+
+          declare -A LOOKUP_PIDS
+          for COMPONENT in "${COMPONENTS[@]}"; do
+            .github/scripts/get-latest-images.sh "${COMPONENT}" \
+              > "${IMAGE_LOOKUP_DIR}/${COMPONENT}.image" \
+              2> >(sed -u "s/^/[${COMPONENT}] /" >&2) &
+            LOOKUP_PIDS[${COMPONENT}]=$!
+          done
+
+          FAILED_COMPONENTS=()
+          for COMPONENT in "${COMPONENTS[@]}"; do
+            if ! wait "${LOOKUP_PIDS[${COMPONENT}]}"; then
+              FAILED_COMPONENTS+=("${COMPONENT}")
+            fi
+          done
+
+          if [[ ${#FAILED_COMPONENTS[@]} -gt 0 ]]; then
+            echo "::error::Image lookup failed for ${FAILED_COMPONENTS[*]}"
+            exit 1
+          fi
+
+          TOOLKIT_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/toolkit.image")
+          DEVICE_PLUGIN_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/device-plugin.image")
+          MIG_MANAGER_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/mig-manager.image")
+          DRIVER_MANAGER_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/driver-manager.image")
+          VGPU_DEVICE_MANAGER_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/vgpu-device-manager.image")
+          KATA_SANDBOX_DEVICE_PLUGIN_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/kata-sandbox-device-plugin.image")
+          KUBEVIRT_GPU_DEVICE_PLUGIN_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/kubevirt-gpu-device-plugin.image")
+          CC_MANAGER_IMAGE=$(< "${IMAGE_LOOKUP_DIR}/cc-manager.image")
 
           .github/scripts/generate-values-overrides.sh values-overrides.yaml \
             "toolkit=${TOOLKIT_IMAGE}" \
