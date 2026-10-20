@@ -36,7 +36,11 @@ import (
 	"github.com/NVIDIA/gpu-operator/tests/e2e/helpers"
 )
 
-// runLabel marks the namespaces this run created; framework.CreateNamespace sets it too.
+const (
+	clusterPolicyName = "cluster-policy"
+)
+
+// runLabel is the label framework.CreateNamespace sets to framework.RunID on the namespaces it creates.
 const runLabel = "e2e-run"
 
 // operatorChartValues returns the --set values that point the chart at the operator and validator under test.
@@ -94,7 +98,7 @@ func newOperatorInstall(chartValues ...string) *operatorInstall {
 
 	ginkgo.AfterEach(func(ctx context.Context) {
 		if install.clients.kube != nil {
-			saveLogsOnFailure(ctx, install.clients, tcfg.namespace)
+			saveLogsOnFailure(ctx, install.clients, tcfg.namespace, gpuWorkloadNamespace)
 		}
 	})
 
