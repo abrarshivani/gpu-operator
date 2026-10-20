@@ -37,7 +37,8 @@ import (
 )
 
 const (
-	clusterPolicyName = "cluster-policy"
+	clusterPolicyName         = "cluster-policy"
+	operatorComponentSelector = "app.kubernetes.io/component=gpu-operator"
 )
 
 // runLabel is the label framework.CreateNamespace sets to framework.RunID on the namespaces it creates.
@@ -130,6 +131,17 @@ func (install *operatorInstall) uninstall(ctx context.Context) {
 		}
 	}
 	framework.ExpectNoError(errors.Join(cleanupErrs...))
+}
+
+func (install *operatorInstall) upgrade(ctx context.Context, chartValues ...string) {
+	ginkgo.GinkgoHelper()
+
+	err := install.operator.Upgrade(ctx, append(operatorChartValues(), chartValues...), helpers.ChartOptions{
+		ReleaseName: install.releaseName,
+		Timeout:     helmInstallTimeout,
+		Wait:        true,
+	})
+	framework.ExpectNoError(err, "failed to upgrade release %s", install.releaseName)
 }
 
 // saveLogsOnFailure writes the logs of every pod in the given namespaces to a directory under
