@@ -23,6 +23,9 @@ on:
         description: "Replace today's main build if it is already published"
         type: boolean
         default: false
+  push:
+    branches:
+      - test-main-bundle-on-fork
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,6 +38,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/variables.yaml
+    with:
+      operator_image: ghcr.io/nvidia/gpu-operator
+      operator_version: dbb11e85
 
   main-version:
     needs: [variables]
@@ -277,6 +283,39 @@ jobs:
             "${CHART_VERSION}" \
             "${BUNDLE_IMAGE}" \
             "${operand_images[@]}"
+
+  read-back-main-build:
+    needs: [variables, record-main-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Get regctl version
+        run: |
+          REGCTL_VERSION=$(grep "REGCTL_VERSION ?=" versions.mk)
+          echo "REGCTL_VERSION=${REGCTL_VERSION##REGCTL_VERSION ?= }" >> "${GITHUB_ENV}"
+      - name: Install regctl
+        uses: regclient/actions/regctl-installer@148669fe4b19151fcab6e00c6df2db43b9e2b097
+        with:
+          release: ${{ env.REGCTL_VERSION }}
+      - name: Login to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GH_TOKEN}" | regctl registry login ghcr.io -u "${GITHUB_ACTOR}" --pass-stdin
+      - name: Read the record back as forward compatibility does
+        env:
+          OPERATOR_IMAGE_BASE: ${{ needs.variables.outputs.operator_image_base }}
+        run: |
+          set -euo pipefail
+          .github/scripts/get-latest-main-build.sh "${OPERATOR_IMAGE_BASE}/main-builds" "${OPERATOR_IMAGE_BASE}/charts/gpu-operator" 1
+          newest_record="${OPERATOR_IMAGE_BASE}/main-builds:$(regctl tag ls "${OPERATOR_IMAGE_BASE}/main-builds" | grep -E '^0\.0\.0-main-[0-9]{8}$' | sort | tail -n 1)"
+          regctl manifest get "${newest_record}"
+          regctl artifact get "${newest_record}" | jq .
 
   notify-failure:
     runs-on: ubuntu-latest
