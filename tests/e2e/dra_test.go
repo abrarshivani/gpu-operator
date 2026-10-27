@@ -68,6 +68,9 @@ const (
 	longRunningCUDAWorkloadImage        = "nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1-ubuntu18.04"
 	longRunningCUDAWorkloadContainer    = "cuda-nbody"
 	claimWorkloadContainer              = "cuda-vector-add"
+	// The cuda-sample images (vectorAddImage, longRunningCUDAWorkloadImage) ship their sample as this
+	// entrypoint, which is not on PATH, so a command that replaces the entrypoint must call it here.
+	cudaSampleBinaryPath = "/cuda-samples/sample"
 )
 
 // gpuClusterChartValues returns the --set values that install a GPUCluster and the default NVIDIADriver
@@ -329,8 +332,8 @@ func runGPUClaimWorkload(ctx context.Context, clients clusterClients) {
 // longRunningCUDACommand prints the UUID of the claimed GPU, then keeps it busy with nbody for duration.
 func longRunningCUDACommand(duration time.Duration) []string {
 	return []string{"bash", "-c", fmt.Sprintf(
-		`nvidia-smi -L && deadline=$((SECONDS + %d)) && while (( SECONDS < deadline )); do nbody -benchmark -numbodies=65536 > /dev/null || exit 1; done`,
-		int(duration.Seconds()))}
+		`nvidia-smi -L && deadline=$((SECONDS + %d)) && while (( SECONDS < deadline )); do %s -benchmark -numbodies=65536 > /dev/null || exit 1; done`,
+		int(duration.Seconds()), cudaSampleBinaryPath)}
 }
 
 // newLongRunningCUDAPod returns a pod that keeps the GPU of ResourceClaim claimName busy for duration.

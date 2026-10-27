@@ -57,6 +57,7 @@ const (
 	standaloneDCGMPort        = 5555
 	dcgmExporterMetricsPort   = "9400"
 	gpuUtilizationMetricName  = "DCGM_FI_DEV_GPU_UTIL"
+	maxGPUUtilizationPercent  = 100
 )
 
 var gpuUUIDPattern = regexp.MustCompile(`UUID: (GPU-[0-9a-fA-F-]+)`)
@@ -243,7 +244,8 @@ func standaloneDCGMSpecs(install *operatorInstall) {
 
 			// dcgm-exporter names the labels that map a GPU to the pod using it "pod" and "namespace".
 			isWorkloadBusySample := func(sample gpuMetricSample) bool {
-				return sample.labels["pod"] == workloadPod.Name && sample.labels["namespace"] == workloadPod.Namespace && sample.value > 0
+				return sample.labels["pod"] == workloadPod.Name && sample.labels["namespace"] == workloadPod.Namespace &&
+					sample.value > 0 && sample.value <= maxGPUUtilizationPercent
 			}
 			waitFor(ctx, dcgmWorkloadRunDuration, fmt.Sprintf("waiting for the DCGM exporter on node %s to report the GPU utilization of pod %s/%s", nodeName, workloadPod.Namespace, workloadPod.Name), func(g gomega.Gomega) {
 				gpuUtilizationSamples, err := scrapeGPUUtilizationSamples(ctx, clients, nodeName)

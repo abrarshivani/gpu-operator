@@ -492,8 +492,8 @@ func chartCRDSchemas(ctx context.Context, operator *helpers.OperatorClient, grou
 	return schemasByCRDVersion
 }
 
-// expectCRDSchemasMatchChart checks that every served version of the chart's CRDs in group has the same
-// schema in the cluster.
+// expectCRDSchemasMatchChart checks that every version of the chart's CRDs in group is in the cluster with
+// the same served and storage flags, and that every served version has the same schema.
 func expectCRDSchemasMatchChart(ctx context.Context, clients clusterClients, operator *helpers.OperatorClient, group string) {
 	ginkgo.GinkgoHelper()
 	chartCRDs := chartCRDsInGroup(ctx, operator, group)
@@ -503,17 +503,20 @@ func expectCRDSchemasMatchChart(ctx context.Context, clients clusterClients, ope
 		clusterCRD, err := clients.apiExtensions.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, chartCRD.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err, "failed to get CRD %s", chartCRD.Name)
 		for _, chartVersion := range chartCRD.Spec.Versions {
-			if !chartVersion.Served {
-				continue
-			}
 			versionIndex := slices.IndexFunc(clusterCRD.Spec.Versions, func(clusterVersion apiextensionsv1.CustomResourceDefinitionVersion) bool {
 				return clusterVersion.Name == chartVersion.Name
 			})
 			gomega.Expect(versionIndex).NotTo(gomega.Equal(-1), "CRD %s in the cluster does not have version %s", chartCRD.Name, chartVersion.Name)
+			clusterVersion := clusterCRD.Spec.Versions[versionIndex]
+			gomega.Expect(clusterVersion.Served).To(gomega.Equal(chartVersion.Served), "CRD %s version %s in the cluster has a different served flag than the chart", chartCRD.Name, chartVersion.Name)
+			gomega.Expect(clusterVersion.Storage).To(gomega.Equal(chartVersion.Storage), "CRD %s version %s in the cluster has a different storage flag than the chart", chartCRD.Name, chartVersion.Name)
+			if !chartVersion.Served {
+				continue
+			}
 
 			chartSchema, err := json.Marshal(chartVersion.Schema)
 			framework.ExpectNoError(err, "failed to encode the schema of CRD %s version %s in the chart", chartCRD.Name, chartVersion.Name)
-			clusterSchema, err := json.Marshal(clusterCRD.Spec.Versions[versionIndex].Schema)
+			clusterSchema, err := json.Marshal(clusterVersion.Schema)
 			framework.ExpectNoError(err, "failed to encode the schema of CRD %s version %s in the cluster", chartCRD.Name, chartVersion.Name)
 			gomega.Expect(string(clusterSchema)).To(gomega.MatchJSON(chartSchema), "CRD %s version %s in the cluster differs from the chart", chartCRD.Name, chartVersion.Name)
 		}

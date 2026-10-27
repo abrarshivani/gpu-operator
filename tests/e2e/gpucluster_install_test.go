@@ -42,8 +42,6 @@ const (
 	claimlessWorkloadContainer = "cuda-vector-add"
 	passthroughFeatureGate     = "PassthroughSupport=true"
 
-	// vectorAddBinaryPath is the entrypoint of vectorAddImage.
-	vectorAddBinaryPath     = "/cuda-samples/sample"
 	noGPUDeviceNodesMessage = "no GPU device nodes visible"
 	// The CUDA error varies with what the container sees (no device, no driver libraries), so only
 	// the prefix vectorAdd prints for its first device call is matched.
@@ -308,7 +306,7 @@ func gpuClusterUninstallSpecs(install *operatorInstall) {
 // /dev/nvidia<N> GPU device nodes it sees and then runs vectorAdd.
 func newClaimlessVectorAddPod(name string) *corev1.Pod {
 	listGPUDeviceNodesThenRunVectorAdd := fmt.Sprintf(`ls /dev/nvidia[0-9]* 2>/dev/null || echo %q; exec %s`,
-		noGPUDeviceNodesMessage, vectorAddBinaryPath)
+		noGPUDeviceNodesMessage, cudaSampleBinaryPath)
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gpuWorkloadNamespace},
 		Spec: corev1.PodSpec{
