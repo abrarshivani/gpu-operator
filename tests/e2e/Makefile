@@ -25,7 +25,10 @@ TARGET_DRIVER_VERSION ?= $(shell sed -n 's/^: $${TARGET_DRIVER_VERSION:="\(.*\)"
 
 LOG_DIR ?= /tmp/logs
 
-# clusterpolicy or nvidia-driver, the Ginkgo ports of the defaults and nvidia-driver test cases in tests/cases
+GINKGO_TIMEOUT ?= 65m
+
+# clusterpolicy or nvidia-driver, the Ginkgo ports of the defaults and nvidia-driver test cases in tests/cases,
+# or gpucluster, the GPUCluster (DRA) specs
 GINKGO_LABEL_FILTER ?= clusterpolicy
 
 .PHONY: e2e-test
@@ -42,10 +45,12 @@ e2e-test:
 		-operator-version=$(OPERATOR_VERSION) \
 		-helm-chart=$(HELM_CHART) \
 		$(if $(HELM_CHART_VERSION),-helm-chart-version=$(HELM_CHART_VERSION)) \
+		$(if $(RELEASE_HELM_CHART),-release-helm-chart=$(RELEASE_HELM_CHART)) \
+		$(if $(RELEASE_HELM_CHART_VERSION),-release-helm-chart-version=$(RELEASE_HELM_CHART_VERSION)) \
 		$(if $(VALUES_FILE),-values-file=$(VALUES_FILE)) \
 		$(if $(CONTAINER_RUNTIME),-container-runtime=$(CONTAINER_RUNTIME)) \
 		$(if $(TARGET_DRIVER_VERSION),-target-driver-version=$(TARGET_DRIVER_VERSION)) \
 		-log-dir=$(LOG_DIR) \
-		-ginkgo.timeout=65m \
+		-ginkgo.timeout=$(GINKGO_TIMEOUT) \
 		-ginkgo.focus="gpu-operator-e2e" \
 		-ginkgo.label-filter="$(GINKGO_LABEL_FILTER)"
