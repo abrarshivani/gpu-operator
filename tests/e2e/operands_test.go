@@ -40,6 +40,7 @@ import (
 const (
 	gpuWorkloadName      = "gpu-operator-test"
 	gpuWorkloadNamespace = "default"
+	vectorAddImage       = "nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04"
 
 	driverUpgradeStateLabel = "nvidia.com/gpu-driver-upgrade-state"
 	driverContainerName     = "nvidia-driver-ctr"
@@ -212,7 +213,7 @@ func runGPUWorkload(ctx context.Context, clients clusterClients) {
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			Containers: []corev1.Container{{
 				Name:  "cuda-vector-add",
-				Image: "nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubuntu22.04",
+				Image: vectorAddImage,
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{
 						"nvidia.com/gpu": resource.MustParse("1"),

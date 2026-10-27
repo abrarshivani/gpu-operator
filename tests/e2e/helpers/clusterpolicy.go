@@ -43,6 +43,18 @@ func (h *ClusterPolicyClient) Get(ctx context.Context, name string) (*nvidiav1.C
 	return h.client.NvidiaV1().ClusterPolicies().Get(ctx, name, metav1.GetOptions{})
 }
 
+func (h *ClusterPolicyClient) List(ctx context.Context) (*nvidiav1.ClusterPolicyList, error) {
+	return h.client.NvidiaV1().ClusterPolicies().List(ctx, metav1.ListOptions{})
+}
+
+func (h *ClusterPolicyClient) Create(ctx context.Context, cp *nvidiav1.ClusterPolicy) (*nvidiav1.ClusterPolicy, error) {
+	return h.client.NvidiaV1().ClusterPolicies().Create(ctx, cp, metav1.CreateOptions{})
+}
+
+func (h *ClusterPolicyClient) Delete(ctx context.Context, name string) error {
+	return h.client.NvidiaV1().ClusterPolicies().Delete(ctx, name, metav1.DeleteOptions{})
+}
+
 func (h *ClusterPolicyClient) Update(ctx context.Context, cp *nvidiav1.ClusterPolicy) (*nvidiav1.ClusterPolicy, error) {
 	return h.client.NvidiaV1().ClusterPolicies().Update(ctx, cp, metav1.UpdateOptions{})
 }

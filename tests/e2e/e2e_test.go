@@ -34,19 +34,21 @@ import (
 )
 
 type testConfig struct {
-	helmChart           string
-	helmChartVersion    string
-	valuesFile          string
-	namespace           string
-	operatorRepository  string
-	operatorImage       string
-	operatorVersion     string
-	validatorRepository string
-	validatorImage      string
-	validatorVersion    string
-	containerRuntime    string
-	targetDriverVersion string
-	logDir              string
+	helmChart               string
+	helmChartVersion        string
+	releaseHelmChart        string
+	releaseHelmChartVersion string
+	valuesFile              string
+	namespace               string
+	operatorRepository      string
+	operatorImage           string
+	operatorVersion         string
+	validatorRepository     string
+	validatorImage          string
+	validatorVersion        string
+	containerRuntime        string
+	targetDriverVersion     string
+	logDir                  string
 }
 
 // runID is a unique identifier of the e2e run.
@@ -66,6 +68,8 @@ func createGinkgoConfig() (types.SuiteConfig, types.ReporterConfig) {
 func TestMain(m *testing.M) {
 	flag.StringVar(&tcfg.helmChart, "helm-chart", "", "Helm chart to use")
 	flag.StringVar(&tcfg.helmChartVersion, "helm-chart-version", "", "Helm chart version to use, required when helm-chart is an OCI reference without a tag")
+	flag.StringVar(&tcfg.releaseHelmChart, "release-helm-chart", "", "Helm chart of the latest release, which the GPUCluster upgrade specs install before upgrading to -helm-chart; they are skipped when it is not set")
+	flag.StringVar(&tcfg.releaseHelmChartVersion, "release-helm-chart-version", "", "Version of -release-helm-chart, required when it is an OCI reference without a tag")
 	flag.StringVar(&tcfg.valuesFile, "values-file", "", "Helm values file to apply before the operator and validator image settings")
 	flag.StringVar(&tcfg.namespace, "namespace", "gpu-operator", "Namespace name to use for the gpu-operator helm deploys")
 	flag.StringVar(&tcfg.operatorRepository, "operator-repository", "", "GPU Operator image repository to use")

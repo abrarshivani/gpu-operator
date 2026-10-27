@@ -98,24 +98,11 @@ var _ = ginkgo.Describe(e2eTestPrefix+"-nvidia-driver", ginkgo.Label("nvidia-dri
 	})
 
 	ginkgo.It("moves the default to an arbitrarily named NVIDIADriver", func(ctx context.Context) {
-		clients := install.clients
-		currentDefaultDriverName := singleDefaultDriverName(ctx, clients)
-		framework.ExpectNoError(clients.drivers.SetDefault(ctx, currentDefaultDriverName, false), "failed to clear the default of NVIDIADriver/%s", currentDefaultDriverName)
-		framework.ExpectNoError(clients.drivers.Copy(ctx, currentDefaultDriverName, defaultDriverName, true), "failed to create NVIDIADriver/%s", defaultDriverName)
-		framework.ExpectNoError(clients.drivers.Delete(ctx, currentDefaultDriverName), "failed to delete NVIDIADriver/%s", currentDefaultDriverName)
-
-		waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
-		waitForNodesOwnedByDriver(ctx, clients, defaultDriverName, nvidiaDriverOwnerTimeout)
-		waitForDriverDaemonSets(ctx, clients, defaultDriverName, nvidiaDriverOwnerTimeout)
+		moveDefaultToArbitrarilyNamedDriver(ctx, install.clients)
 	})
 
 	ginkgo.It("hands GPU nodes to a user-defined NVIDIADriver", func(ctx context.Context) {
-		clients := install.clients
-		framework.ExpectNoError(clients.drivers.Copy(ctx, singleDefaultDriverName(ctx, clients), userDriverName, false), "failed to create NVIDIADriver/%s", userDriverName)
-
-		waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
-		waitForDriverDaemonSets(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
-		waitForPodsReady(ctx, clients, helpers.DriverComponentSelector)
+		handGPUNodesToUserDriver(ctx, install.clients)
 	})
 
 	ginkgo.It("upgrades the driver of the user-defined NVIDIADriver", func(ctx context.Context) {
@@ -130,61 +117,89 @@ var _ = ginkgo.Describe(e2eTestPrefix+"-nvidia-driver", ginkgo.Label("nvidia-dri
 	})
 
 	ginkgo.It("applies custom labels to the driver pods", func(ctx context.Context) {
-		clients := install.clients
-		customLabels := map[string]string{"cloudprovider": "aws", "platform": "kubernetes"}
-		err := clients.drivers.Modify(ctx, userDriverName, func(driver *nvidiav1alpha1.NVIDIADriver) {
-			driver.Spec.Labels = customLabels
-		})
-		framework.ExpectNoError(err, "failed to set the labels of NVIDIADriver/%s", userDriverName)
-
-		waitFor(ctx, nvidiaDriverReconcileTimeout, fmt.Sprintf("waiting for the driver daemonsets of NVIDIADriver/%s to carry the custom labels", userDriverName), func(g gomega.Gomega) {
-			daemonSets, err := clients.drivers.OwnedDaemonSets(ctx, tcfg.namespace, userDriverName)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(daemonSets).NotTo(gomega.BeEmpty())
-			for _, daemonSet := range daemonSets {
-				for key, value := range customLabels {
-					g.Expect(daemonSet.Spec.Template.Labels).To(gomega.HaveKeyWithValue(key, value), "daemonset %s", daemonSet.Name)
-				}
-			}
-		})
-		rolloutDriverPods(ctx, clients)
-
-		gpuNodes, err := clients.nodes.ListGPUNodes(ctx)
-		framework.ExpectNoError(err, "failed to list GPU nodes")
-		labeledDriverSelector := helpers.DriverComponentSelector + "," + labels.SelectorFromSet(customLabels).String()
-		labeledDriverPods, err := clients.pods.List(ctx, tcfg.namespace, labeledDriverSelector)
-		framework.ExpectNoError(err, "failed to list pods matching %s", labeledDriverSelector)
-		gomega.Expect(labeledDriverPods).To(gomega.HaveLen(len(gpuNodes)), "custom labels are missing from one or more driver pods")
+		applyCustomLabelsToDriverPods(ctx, install.clients)
 	})
 
 	ginkgo.It("reports a node conflict when the default field is cleared", func(ctx context.Context) {
-		clients := install.clients
-		framework.ExpectNoError(clients.drivers.SetDefault(ctx, defaultDriverName, false), "failed to clear the default of NVIDIADriver/%s", defaultDriverName)
-		waitForDriverError(ctx, clients, userDriverName, conditions.ConflictingNodeSelector, "")
-		waitForDriverError(ctx, clients, defaultDriverName, conditions.ConflictingNodeSelector, "")
-		expectNodesOwnedByDriver(ctx, clients, userDriverName)
-
-		framework.ExpectNoError(clients.drivers.SetDefault(ctx, defaultDriverName, true), "failed to set the default of NVIDIADriver/%s", defaultDriverName)
-		waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
-		waitForDriverReady(ctx, clients, userDriverName)
-		waitForDriverReady(ctx, clients, defaultDriverName)
-		waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+		verifyNodeConflictWhenDefaultCleared(ctx, install.clients)
 	})
 
 	ginkgo.It("reports multiple default NVIDIADrivers as not ready", func(ctx context.Context) {
-		clients := install.clients
-		framework.ExpectNoError(clients.drivers.Copy(ctx, defaultDriverName, duplicateDefaultDriverName, true), "failed to create NVIDIADriver/%s", duplicateDefaultDriverName)
-		waitForDriverError(ctx, clients, defaultDriverName, conditions.ReconcileFailed, duplicateDefaultMessage)
-		waitForDriverError(ctx, clients, duplicateDefaultDriverName, conditions.ReconcileFailed, duplicateDefaultMessage)
-		expectNodesOwnedByDriver(ctx, clients, userDriverName)
-
-		framework.ExpectNoError(clients.drivers.Delete(ctx, duplicateDefaultDriverName), "failed to delete NVIDIADriver/%s", duplicateDefaultDriverName)
-		waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
-		waitForDriverReady(ctx, clients, defaultDriverName)
-		waitForDriverReady(ctx, clients, userDriverName)
-		waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+		verifyMultipleDefaultDriversNotReady(ctx, install.clients)
 	})
 })
+
+func moveDefaultToArbitrarilyNamedDriver(ctx context.Context, clients clusterClients) {
+	currentDefaultDriverName := singleDefaultDriverName(ctx, clients)
+	framework.ExpectNoError(clients.drivers.SetDefault(ctx, currentDefaultDriverName, false), "failed to clear the default of NVIDIADriver/%s", currentDefaultDriverName)
+	framework.ExpectNoError(clients.drivers.Copy(ctx, currentDefaultDriverName, defaultDriverName, true), "failed to create NVIDIADriver/%s", defaultDriverName)
+	framework.ExpectNoError(clients.drivers.Delete(ctx, currentDefaultDriverName), "failed to delete NVIDIADriver/%s", currentDefaultDriverName)
+
+	waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
+	waitForNodesOwnedByDriver(ctx, clients, defaultDriverName, nvidiaDriverOwnerTimeout)
+	waitForDriverDaemonSets(ctx, clients, defaultDriverName, nvidiaDriverOwnerTimeout)
+}
+
+func handGPUNodesToUserDriver(ctx context.Context, clients clusterClients) {
+	framework.ExpectNoError(clients.drivers.Copy(ctx, singleDefaultDriverName(ctx, clients), userDriverName, false), "failed to create NVIDIADriver/%s", userDriverName)
+
+	waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+	waitForDriverDaemonSets(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+	waitForPodsReady(ctx, clients, helpers.DriverComponentSelector)
+}
+
+func applyCustomLabelsToDriverPods(ctx context.Context, clients clusterClients) {
+	customLabels := map[string]string{"cloudprovider": "aws", "platform": "kubernetes"}
+	err := clients.drivers.Modify(ctx, userDriverName, func(driver *nvidiav1alpha1.NVIDIADriver) {
+		driver.Spec.Labels = customLabels
+	})
+	framework.ExpectNoError(err, "failed to set the labels of NVIDIADriver/%s", userDriverName)
+
+	waitFor(ctx, nvidiaDriverReconcileTimeout, fmt.Sprintf("waiting for the driver daemonsets of NVIDIADriver/%s to carry the custom labels", userDriverName), func(g gomega.Gomega) {
+		daemonSets, err := clients.drivers.OwnedDaemonSets(ctx, tcfg.namespace, userDriverName)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(daemonSets).NotTo(gomega.BeEmpty())
+		for _, daemonSet := range daemonSets {
+			for key, value := range customLabels {
+				g.Expect(daemonSet.Spec.Template.Labels).To(gomega.HaveKeyWithValue(key, value), "daemonset %s", daemonSet.Name)
+			}
+		}
+	})
+	rolloutDriverPods(ctx, clients)
+
+	gpuNodes, err := clients.nodes.ListGPUNodes(ctx)
+	framework.ExpectNoError(err, "failed to list GPU nodes")
+	labeledDriverSelector := helpers.DriverComponentSelector + "," + labels.SelectorFromSet(customLabels).String()
+	labeledDriverPods, err := clients.pods.List(ctx, tcfg.namespace, labeledDriverSelector)
+	framework.ExpectNoError(err, "failed to list pods matching %s", labeledDriverSelector)
+	gomega.Expect(labeledDriverPods).To(gomega.HaveLen(len(gpuNodes)), "custom labels are missing from one or more driver pods")
+}
+
+func verifyNodeConflictWhenDefaultCleared(ctx context.Context, clients clusterClients) {
+	framework.ExpectNoError(clients.drivers.SetDefault(ctx, defaultDriverName, false), "failed to clear the default of NVIDIADriver/%s", defaultDriverName)
+	waitForDriverError(ctx, clients, userDriverName, conditions.ConflictingNodeSelector, "")
+	waitForDriverError(ctx, clients, defaultDriverName, conditions.ConflictingNodeSelector, "")
+	expectNodesOwnedByDriver(ctx, clients, userDriverName)
+
+	framework.ExpectNoError(clients.drivers.SetDefault(ctx, defaultDriverName, true), "failed to set the default of NVIDIADriver/%s", defaultDriverName)
+	waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
+	waitForDriverReady(ctx, clients, userDriverName)
+	waitForDriverReady(ctx, clients, defaultDriverName)
+	waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+}
+
+func verifyMultipleDefaultDriversNotReady(ctx context.Context, clients clusterClients) {
+	framework.ExpectNoError(clients.drivers.Copy(ctx, defaultDriverName, duplicateDefaultDriverName, true), "failed to create NVIDIADriver/%s", duplicateDefaultDriverName)
+	waitForDriverError(ctx, clients, defaultDriverName, conditions.ReconcileFailed, duplicateDefaultMessage)
+	waitForDriverError(ctx, clients, duplicateDefaultDriverName, conditions.ReconcileFailed, duplicateDefaultMessage)
+	expectNodesOwnedByDriver(ctx, clients, userDriverName)
+
+	framework.ExpectNoError(clients.drivers.Delete(ctx, duplicateDefaultDriverName), "failed to delete NVIDIADriver/%s", duplicateDefaultDriverName)
+	waitForSingleDefaultDriver(ctx, clients, defaultDriverName, nvidiaDriverReconcileTimeout)
+	waitForDriverReady(ctx, clients, defaultDriverName)
+	waitForDriverReady(ctx, clients, userDriverName)
+	waitForNodesOwnedByDriver(ctx, clients, userDriverName, nvidiaDriverOwnerTimeout)
+}
 
 func singleDefaultDriverName(ctx context.Context, clients clusterClients) string {
 	ginkgo.GinkgoHelper()
