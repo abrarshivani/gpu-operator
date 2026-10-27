@@ -37,10 +37,11 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -101,13 +102,12 @@ var _ = ginkgo.Describe(e2eTestPrefix+"-gpucluster-driver-change", ginkgo.Label(
 		expectClaimAllocatedByGPUDriver(ctx, clients, claimName)
 
 		waitForPodsReady(ctx, clients, helpers.DriverComponentSelector)
-		previousDriverPods, err := clients.pods.List(ctx, tcfg.namespace, helpers.DriverComponentSelector)
-		framework.ExpectNoError(err, "failed to list the driver pods")
+		restartWatch := watchDriverRestart(ctx, clients, &workloadPod, defaultDriverVersion)
 
-		err = clients.drivers.UpdateDriverVersion(ctx, consts.DefaultNVIDIADriverName, defaultDriverVersion)
+		err := clients.drivers.UpdateDriverVersion(ctx, consts.DefaultNVIDIADriverName, defaultDriverVersion)
 		framework.ExpectNoError(err, "failed to update the version of NVIDIADriver/%s to %s", consts.DefaultNVIDIADriverName, defaultDriverVersion)
 
-		waitForPodDrainedBeforeDriverRestart(ctx, clients, &workloadPod, previousDriverPods, defaultDriverVersion)
+		restartWatch.expectWorkloadDrainedBeforeDriverRestart(ctx)
 	})
 
 	ginkgo.It("rolls the driver out to the chart default version", func(ctx context.Context) {
@@ -315,91 +315,110 @@ func isDriverPodOnVersion(pod *corev1.Pod, version string) bool {
 	return strings.Contains(pod.Spec.Containers[0].Image, version)
 }
 
-// waitForPodDrainedBeforeDriverRestart waits for the driver upgrade to delete workloadPod and then to create
-// the driver pods on newDriverVersion. It fails as soon as one of previousDriverPods is deleted while
-// workloadPod still exists, workloadPod ends on its own, or a driver pod on newDriverVersion turns out to be
-// created before the deletion of workloadPod was requested.
-func waitForPodDrainedBeforeDriverRestart(ctx context.Context, clients clusterClients, workloadPod *corev1.Pod, previousDriverPods []corev1.Pod, newDriverVersion string) {
-	ginkgo.GinkgoHelper()
-	previousDriverPodUIDs := make(map[types.UID]bool, len(previousDriverPods))
-	for _, driverPod := range previousDriverPods {
-		previousDriverPodUIDs[driverPod.UID] = true
-	}
-
-	// Nil until workloadPod is seen terminating; a driver pod listed before that read was created before it.
-	var workloadDeletionTime *metav1.Time
-	stopIfNewDriverPodPrecedesDrain := func(driverPods []corev1.Pod) {
-		for _, driverPod := range driverPods {
-			if !isDriverPodOnVersion(&driverPod, newDriverVersion) {
-				continue
-			}
-			if workloadDeletionTime == nil {
-				gomega.StopTrying(fmt.Sprintf("driver pod %s on version %s was created before pod %s/%s was deleted",
-					driverPod.Name, newDriverVersion, workloadPod.Namespace, workloadPod.Name)).Now()
-			}
-			// Both timestamps have second granularity, so a driver pod created in the same second passes.
-			if driverPod.CreationTimestamp.Before(workloadDeletionTime) {
-				gomega.StopTrying(fmt.Sprintf("driver pod %s on version %s was created at %s, before pod %s/%s was deleted at %s",
-					driverPod.Name, newDriverVersion, driverPod.CreationTimestamp, workloadPod.Namespace, workloadPod.Name, workloadDeletionTime)).Now()
-			}
-		}
-	}
-
-	drainDescription := fmt.Sprintf("waiting for the driver upgrade to drain pod %s/%s before restarting the driver", workloadPod.Namespace, workloadPod.Name)
-	waitFor(ctx, claimWorkloadDrainTimeout, drainDescription, func(g gomega.Gomega) {
-		// Listed before the workload pod is read, so a driver pod seen here existed while the workload pod did.
-		driverPods, err := clients.pods.List(ctx, tcfg.namespace, helpers.DriverComponentSelector)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		runningPreviousDriverPodCount := 0
-		for _, driverPod := range driverPods {
-			if previousDriverPodUIDs[driverPod.UID] && driverPod.DeletionTimestamp == nil {
-				runningPreviousDriverPodCount++
-			}
-		}
-
-		currentPod, err := clients.kube.CoreV1().Pods(workloadPod.Namespace).Get(ctx, workloadPod.Name, metav1.GetOptions{})
-		switch {
-		case err == nil:
-			if currentPod.DeletionTimestamp == nil && (currentPod.Status.Phase == corev1.PodSucceeded || currentPod.Status.Phase == corev1.PodFailed) {
-				gomega.StopTrying(fmt.Sprintf("pod %s/%s ended in phase %s instead of being drained", workloadPod.Namespace, workloadPod.Name, currentPod.Status.Phase)).Now()
-			}
-			if currentPod.DeletionTimestamp != nil && workloadDeletionTime == nil {
-				workloadDeletionTime = new(deletionRequestTime(currentPod))
-			}
-			if runningPreviousDriverPodCount < len(previousDriverPodUIDs) {
-				gomega.StopTrying(fmt.Sprintf("a driver pod was deleted while pod %s/%s was still on the node", workloadPod.Namespace, workloadPod.Name)).Now()
-			}
-		case apierrors.IsNotFound(err):
-			// bash runs as PID 1 without a SIGTERM handler, so the pod terminates for its whole grace period and a poll
-			// sees it. A pod gone unseen leaves no deletion time, and the local clock may differ from the API server's.
-			if workloadDeletionTime == nil {
-				gomega.StopTrying(fmt.Sprintf("pod %s/%s was gone before it was seen terminating, so its deletion cannot be ordered against the driver restart",
-					workloadPod.Namespace, workloadPod.Name)).Now()
-			}
-		default:
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-		}
-		stopIfNewDriverPodPrecedesDrain(driverPods)
-		g.Expect(err).To(gomega.MatchError(apierrors.IsNotFound, "a NotFound error"), "pod %s/%s is not drained yet", workloadPod.Namespace, workloadPod.Name)
-	})
-
-	restartDescription := fmt.Sprintf("waiting for the driver upgrade to create the driver pods on version %s", newDriverVersion)
-	waitFor(ctx, driverUpgradeTimeout, restartDescription, func(g gomega.Gomega) {
-		driverPods, err := clients.pods.List(ctx, tcfg.namespace, helpers.DriverComponentSelector)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		stopIfNewDriverPodPrecedesDrain(driverPods)
-		g.Expect(driverPods).NotTo(gomega.BeEmpty(), "no driver pods found")
-		for _, driverPod := range driverPods {
-			g.Expect(isDriverPodOnVersion(&driverPod, newDriverVersion)).To(gomega.BeTrue(), "pod %s runs %s", driverPod.Name, driverPod.Spec.Containers[0].Image)
-		}
-	})
+// driverRestartWatch follows a GPU workload pod and the driver pods through a single pod watch, whose events
+// arrive in the order the API server applied them. Polling cannot order a deletion it did not see.
+type driverRestartWatch struct {
+	workloadPod           *corev1.Pod
+	newDriverVersion      string
+	driverPodSelector     labels.Selector
+	previousDriverPodUIDs map[types.UID]bool
+	podWatch              watch.Interface
 }
 
-// deletionRequestTime returns when the graceful deletion of pod was requested. The API server sets deletionTimestamp
-// to that time plus the grace period, and a later delete that shortens the grace period never moves the result earlier.
-func deletionRequestTime(pod *corev1.Pod) metav1.Time {
-	gracePeriod := time.Duration(ptr.Deref(pod.DeletionGracePeriodSeconds, 0)) * time.Second
-	return metav1.NewTime(pod.DeletionTimestamp.Add(-gracePeriod))
+// watchDriverRestart lists all pods and watches them from the resourceVersion of that list, so that no event
+// after the listed state is missed. Call it before the driver version changes to newDriverVersion.
+func watchDriverRestart(ctx context.Context, clients clusterClients, workloadPod *corev1.Pod, newDriverVersion string) *driverRestartWatch {
+	ginkgo.GinkgoHelper()
+	driverPodSelector, err := labels.Parse(helpers.DriverComponentSelector)
+	framework.ExpectNoError(err, "failed to parse the driver pod selector %q", helpers.DriverComponentSelector)
+	restartWatch := &driverRestartWatch{
+		workloadPod:           workloadPod,
+		newDriverVersion:      newDriverVersion,
+		driverPodSelector:     driverPodSelector,
+		previousDriverPodUIDs: make(map[types.UID]bool),
+	}
+
+	podList, err := clients.kube.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	framework.ExpectNoError(err, "failed to list the pods")
+	workloadPodListed := false
+	for _, pod := range podList.Items {
+		if pod.UID == workloadPod.UID {
+			workloadPodListed = true
+		} else if restartWatch.isDriverPod(&pod) {
+			restartWatch.previousDriverPodUIDs[pod.UID] = true
+		}
+	}
+	gomega.Expect(workloadPodListed).To(gomega.BeTrue(), "pod %s/%s is gone before the driver version changes", workloadPod.Namespace, workloadPod.Name)
+	gomega.Expect(restartWatch.previousDriverPodUIDs).NotTo(gomega.BeEmpty(), "no driver pods found")
+	for _, pod := range podList.Items {
+		restartWatch.observePod(&pod, false)
+	}
+
+	restartWatch.podWatch, err = clients.kube.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{ResourceVersion: podList.ResourceVersion})
+	framework.ExpectNoError(err, "failed to watch the pods from resourceVersion %s", podList.ResourceVersion)
+	ginkgo.DeferCleanup(restartWatch.podWatch.Stop)
+	return restartWatch
+}
+
+func (w *driverRestartWatch) isDriverPod(pod *corev1.Pod) bool {
+	return pod.Namespace == tcfg.namespace && w.driverPodSelector.Matches(labels.Set(pod.Labels))
+}
+
+// expectWorkloadDrainedBeforeDriverRestart waits for the event that deletes the workload pod. It fails as soon as an
+// earlier event deletes a previous driver pod, creates a driver pod on the new version, or ends the workload pod
+// without a deletion.
+func (w *driverRestartWatch) expectWorkloadDrainedBeforeDriverRestart(ctx context.Context) {
+	ginkgo.GinkgoHelper()
+	ginkgo.By(fmt.Sprintf("waiting for the driver upgrade to drain pod %s/%s before restarting the driver", w.workloadPod.Namespace, w.workloadPod.Name))
+	drainCtx, cancelDrain := context.WithTimeout(ctx, claimWorkloadDrainTimeout)
+	defer cancelDrain()
+
+	// A watch that ends early is not resumed: a new list shows only the latest state of each pod, so an order
+	// violation in the gap would go unseen.
+	for {
+		select {
+		case <-drainCtx.Done():
+			ginkgo.Fail(fmt.Sprintf("pod %s/%s was not drained within %s: %v", w.workloadPod.Namespace, w.workloadPod.Name, claimWorkloadDrainTimeout, drainCtx.Err()))
+		case event, open := <-w.podWatch.ResultChan():
+			if !open {
+				ginkgo.Fail(fmt.Sprintf("the pod watch closed before pod %s/%s was drained, so the drain order is unknown", w.workloadPod.Namespace, w.workloadPod.Name))
+			}
+			switch event.Type {
+			case watch.Error:
+				ginkgo.Fail(fmt.Sprintf("the pod watch failed before pod %s/%s was drained, so the drain order is unknown: %v",
+					w.workloadPod.Namespace, w.workloadPod.Name, apierrors.FromObject(event.Object)))
+			case watch.Added, watch.Modified, watch.Deleted:
+				pod, isPod := event.Object.(*corev1.Pod)
+				gomega.Expect(isPod).To(gomega.BeTrue(), "the pod watch sent a %T", event.Object)
+				if w.observePod(pod, event.Type == watch.Deleted) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// observePod fails if the state of pod breaks the drain order, and reports whether it is the deleted workload pod.
+func (w *driverRestartWatch) observePod(pod *corev1.Pod, podDeleted bool) (workloadPodDeleted bool) {
+	ginkgo.GinkgoHelper()
+	switch {
+	case pod.UID == w.workloadPod.UID:
+		if podDeleted {
+			return true
+		}
+		if pod.DeletionTimestamp == nil && (pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed) {
+			ginkgo.Fail(fmt.Sprintf("pod %s/%s ended in phase %s instead of being drained", pod.Namespace, pod.Name, pod.Status.Phase))
+		}
+	case !w.isDriverPod(pod):
+	case w.previousDriverPodUIDs[pod.UID]:
+		if podDeleted || pod.DeletionTimestamp != nil {
+			ginkgo.Fail(fmt.Sprintf("driver pod %s was deleted while pod %s/%s was still on the node", pod.Name, w.workloadPod.Namespace, w.workloadPod.Name))
+		}
+	case isDriverPodOnVersion(pod, w.newDriverVersion):
+		ginkgo.Fail(fmt.Sprintf("driver pod %s on version %s was created while pod %s/%s was still on the node",
+			pod.Name, w.newDriverVersion, w.workloadPod.Namespace, w.workloadPod.Name))
+	}
+	return false
 }
 
 // waitForDriverPodsOnVersion waits until every driver pod runs version and is ready.
