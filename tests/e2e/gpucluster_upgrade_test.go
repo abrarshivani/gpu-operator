@@ -311,8 +311,22 @@ func waitForJobPodRunning(ctx context.Context, clients clusterClients, jobName s
 	return runningPod
 }
 
+// isDriverPodOnVersion matches the driver image tags the operator builds: <version>-<os> and, for precompiled
+// drivers, <version>-<kernel>-<os>. A substring match would take 580.12-ubuntu22.04 for version 580.1.
 func isDriverPodOnVersion(pod *corev1.Pod, version string) bool {
-	return strings.Contains(pod.Spec.Containers[0].Image, version)
+	driverImageTag := imageTag(pod.Spec.Containers[0].Image)
+	return driverImageTag == version || strings.HasPrefix(driverImageTag, version+"-")
+}
+
+// imageTag returns the tag of imageReference, ignoring any digest, or "" when it has no tag.
+// The tag colon is the last one after the last '/', since a registry host may carry a port.
+func imageTag(imageReference string) string {
+	imageReference, _, _ = strings.Cut(imageReference, "@")
+	tagSeparator := strings.LastIndex(imageReference, ":")
+	if tagSeparator <= strings.LastIndex(imageReference, "/") {
+		return ""
+	}
+	return imageReference[tagSeparator+1:]
 }
 
 // driverRestartWatch follows a GPU workload pod and the driver pods through a single pod watch, whose events
