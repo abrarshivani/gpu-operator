@@ -18,6 +18,8 @@ TERRAFORM="terraform -chdir=${TERRAFORM_DIR}"
 : ${PROJECT:="$(basename "${PROJECT_DIR}")"}
 : ${TEST_NAMESPACE:="test-operator"}
 : ${TARGET_DRIVER_VERSION:="580.178.04"}
+# The latest release, which the GPUCluster upgrade specs upgrade from
+: "${RELEASE_HELM_CHART:="https://helm.ngc.nvidia.com/nvidia/charts/gpu-operator-v26.7.2.tgz"}"
 
 : ${OPERATOR_IMAGE:="nvcr.io/nvidia/gpu-operator"}
 

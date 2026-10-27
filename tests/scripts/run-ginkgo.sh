@@ -35,10 +35,10 @@ OPERATOR_REPOSITORY=$(dirname "${OPERATOR_IMAGE}")
 OPERATOR_IMAGE_NAME=$(basename "${OPERATOR_IMAGE}")
 
 # Ginkgo's own timeout bounds the run; the go test default of 10 minutes would cut it short.
-# It stays well under the CI job's 90 minute timeout, which also covers cluster setup and teardown.
+# Its default stays well under the CI job's 90 minute timeout, which also covers cluster setup and teardown.
 "${E2E_TEST_BINARY}" \
     -test.timeout=0 \
-    -ginkgo.timeout=65m \
+    -ginkgo.timeout="${GINKGO_TIMEOUT:-65m}" \
     -ginkgo.v \
     -ginkgo.label-filter="${LABEL_FILTER}" \
     -ginkgo.junit-report="${LOG_DIR}/ginkgo-${LABEL_FILTER}-junit.xml" \
@@ -46,6 +46,8 @@ OPERATOR_IMAGE_NAME=$(basename "${OPERATOR_IMAGE}")
     -namespace="${TEST_NAMESPACE}" \
     -helm-chart="${CHART_REFERENCE}" \
     -helm-chart-version="${HELM_CHART_VERSION:-}" \
+    -release-helm-chart="${RELEASE_HELM_CHART:-}" \
+    -release-helm-chart-version="${RELEASE_HELM_CHART_VERSION:-}" \
     -values-file="${VALUES_FILE:-}" \
     -operator-repository="${OPERATOR_REPOSITORY}" \
     -operator-image="${OPERATOR_IMAGE_NAME}" \

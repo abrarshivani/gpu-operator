@@ -66,16 +66,30 @@ type operatorInstall struct {
 // with chartValues on top of operatorChartValues(), a DeferCleanup that uninstalls it and deletes the
 // namespace, and an AfterEach that saves pod logs when a spec failed.
 func newOperatorInstall(chartValues ...string) *operatorInstall {
+	return newChartInstall(tcfg.helmChart, tcfg.helmChartVersion, true, chartValues...)
+}
+
+// newReleaseInstall is newOperatorInstall for -release-helm-chart. The release runs its own operator
+// and validator, so neither operatorChartValues() nor -values-file is applied.
+func newReleaseInstall(chartValues ...string) *operatorInstall {
+	return newChartInstall(tcfg.releaseHelmChart, tcfg.releaseHelmChartVersion, false, chartValues...)
+}
+
+func newOperatorClient(chart, chartVersion string) *helpers.OperatorClient {
+	return &helpers.OperatorClient{
+		Chart:        chart,
+		ChartVersion: chartVersion,
+		Namespace:    tcfg.namespace,
+		Kubeconfig:   framework.TestContext.KubeConfig,
+	}
+}
+
+func newChartInstall(chart, chartVersion string, isChartUnderTest bool, chartValues ...string) *operatorInstall {
 	install := &operatorInstall{}
 
 	ginkgo.BeforeAll(func(ctx context.Context) {
 		install.clients = newClusterClients()
-		install.operator = &helpers.OperatorClient{
-			Chart:        tcfg.helmChart,
-			ChartVersion: tcfg.helmChartVersion,
-			Namespace:    tcfg.namespace,
-			Kubeconfig:   framework.TestContext.KubeConfig,
-		}
+		install.operator = newOperatorClient(chart, chartVersion)
 		// The previous Ordered container's uninstall does not wait for its namespace to be gone.
 		err := framework.WaitForNamespacesDeleted(ctx, install.clients.kube, []string{tcfg.namespace}, framework.DefaultNamespaceDeletionTimeout)
 		framework.ExpectNoError(err, "namespace %s was not deleted", tcfg.namespace)
@@ -88,13 +102,17 @@ func newOperatorInstall(chartValues ...string) *operatorInstall {
 
 		_, err = framework.CreateNamespace(ctx, tcfg.namespace, install.clients.kube, nil)
 		framework.ExpectNoError(err, "failed to create namespace %s", tcfg.namespace)
-		_, err = install.operator.Install(ctx, append(operatorChartValues(), chartValues...), helpers.ChartOptions{
+		installValues, valuesFile := chartValues, ""
+		if isChartUnderTest {
+			installValues, valuesFile = append(operatorChartValues(), chartValues...), tcfg.valuesFile
+		}
+		_, err = install.operator.Install(ctx, installValues, helpers.ChartOptions{
 			ReleaseName: install.releaseName,
 			Timeout:     helmInstallTimeout,
-			ValuesFile:  tcfg.valuesFile,
+			ValuesFile:  valuesFile,
 			Wait:        true,
 		})
-		framework.ExpectNoError(err, "failed to install chart %s", tcfg.helmChart)
+		framework.ExpectNoError(err, "failed to install chart %s", chart)
 	})
 
 	ginkgo.AfterEach(func(ctx context.Context) {
@@ -142,6 +160,25 @@ func (install *operatorInstall) upgrade(ctx context.Context, chartValues ...stri
 		Wait:        true,
 	})
 	framework.ExpectNoError(err, "failed to upgrade release %s", install.releaseName)
+}
+
+// upgradeToChartUnderTest upgrades the release to -helm-chart with the operator and validator under
+// test. --reuse-values would render the new chart with the previous chart's defaults, so the new
+// chart's defaults are reset and the release's own values reapplied. OpenAPI validation is off
+// because the chart's pre-upgrade hook updates the CRDs only after helm validates the manifests.
+func (install *operatorInstall) upgradeToChartUnderTest(ctx context.Context) {
+	ginkgo.GinkgoHelper()
+
+	install.operator = newOperatorClient(tcfg.helmChart, tcfg.helmChartVersion)
+	err := install.operator.Upgrade(ctx, operatorChartValues(), helpers.ChartOptions{
+		ReleaseName:              install.releaseName,
+		Timeout:                  helmInstallTimeout,
+		ValuesFile:               tcfg.valuesFile,
+		Wait:                     true,
+		ResetThenReuseValues:     true,
+		DisableOpenAPIValidation: true,
+	})
+	framework.ExpectNoError(err, "failed to upgrade release %s to chart %s", install.releaseName, tcfg.helmChart)
 }
 
 // saveLogsOnFailure writes the logs of every pod in the given namespaces to a directory under

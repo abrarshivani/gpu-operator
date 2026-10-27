@@ -36,6 +36,11 @@ type ChartOptions struct {
 	Timeout     time.Duration
 	ValuesFile  string
 	Wait        bool
+	// ResetThenReuseValues and DisableOpenAPIValidation apply to Upgrade only. ResetThenReuseValues
+	// applies the release's values over the new chart's defaults, where --reuse-values keeps the
+	// previous chart's defaults.
+	ResetThenReuseValues     bool
+	DisableOpenAPIValidation bool
 }
 
 func (op *OperatorClient) Install(ctx context.Context, params []string, chartOpts ChartOptions) (string, error) {
@@ -56,7 +61,14 @@ func (op *OperatorClient) Upgrade(ctx context.Context, params []string, chartOpt
 	if err != nil {
 		return err
 	}
-	args = append(args, "--reuse-values")
+	if chartOpts.ResetThenReuseValues {
+		args = append(args, "--reset-then-reuse-values")
+	} else {
+		args = append(args, "--reuse-values")
+	}
+	if chartOpts.DisableOpenAPIValidation {
+		args = append(args, "--disable-openapi-validation")
+	}
 
 	if _, err := runHelm(ctx, args); err != nil {
 		return fmt.Errorf("error upgrading release %s: %w", chartOpts.ReleaseName, err)
@@ -78,6 +90,44 @@ func (op *OperatorClient) Template(ctx context.Context, params []string) (string
 	}
 
 	return manifests, nil
+}
+
+// ShowCRDs returns the CustomResourceDefinitions in the chart's crds directory.
+func (op *OperatorClient) ShowCRDs(ctx context.Context) (string, error) {
+	if op.Chart == "" {
+		return "", fmt.Errorf("chart must be provided")
+	}
+
+	args := []string{"show", "crds", op.Chart}
+	if op.ChartVersion != "" {
+		args = append(args, "--version", op.ChartVersion)
+	}
+
+	crds, err := runHelm(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("error showing the CRDs of chart %s: %w", op.Chart, err)
+	}
+
+	return crds, nil
+}
+
+// ShowValues returns the chart's default values.
+func (op *OperatorClient) ShowValues(ctx context.Context) (string, error) {
+	if op.Chart == "" {
+		return "", fmt.Errorf("chart must be provided")
+	}
+
+	args := []string{"show", "values", op.Chart}
+	if op.ChartVersion != "" {
+		args = append(args, "--version", op.ChartVersion)
+	}
+
+	values, err := runHelm(ctx, args)
+	if err != nil {
+		return "", fmt.Errorf("error showing the values of chart %s: %w", op.Chart, err)
+	}
+
+	return values, nil
 }
 
 func (op *OperatorClient) Uninstall(ctx context.Context, releaseName string) error {
