@@ -18,17 +18,49 @@ package baseline
 
 import (
 	"context"
+	"time"
+
+	nvidiav1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1"
 
 	"github.com/NVIDIA/gpu-operator/internal/certification"
 	"github.com/NVIDIA/gpu-operator/internal/certification/k8s"
 )
 
-var operandLabels = []string{
-	"nvidia-container-toolkit-daemonset",
-	"nvidia-device-plugin-daemonset",
-	"nvidia-dcgm-exporter",
-	"gpu-feature-discovery",
-	"nvidia-operator-validator",
+type operandCheck struct {
+	appLabel  string
+	isEnabled func(spec *nvidiav1.ClusterPolicySpec) bool
+}
+
+var operands = []operandCheck{
+	{
+		appLabel:  "nvidia-container-toolkit-daemonset",
+		isEnabled: func(spec *nvidiav1.ClusterPolicySpec) bool { return spec.Toolkit.IsEnabled() },
+	},
+	{
+		appLabel:  "nvidia-device-plugin-daemonset",
+		isEnabled: func(spec *nvidiav1.ClusterPolicySpec) bool { return spec.DevicePlugin.IsEnabled() },
+	},
+	{
+		appLabel:  "nvidia-dcgm-exporter",
+		isEnabled: func(spec *nvidiav1.ClusterPolicySpec) bool { return spec.DCGMExporter.IsEnabled() },
+	},
+	{
+		appLabel:  "gpu-feature-discovery",
+		isEnabled: func(spec *nvidiav1.ClusterPolicySpec) bool { return spec.GPUFeatureDiscovery.IsEnabled() },
+	},
+	{
+		appLabel: "nvidia-operator-validator",
+		// The validator has no enabled field; the operator always deploys it.
+		isEnabled: func(*nvidiav1.ClusterPolicySpec) bool { return true },
+	},
+}
+
+// operandVerificationClient is the subset of *k8s.Clients used by operand-verification.
+type operandVerificationClient interface {
+	GetClusterPolicy(ctx context.Context) (*nvidiav1.ClusterPolicy, error)
+	HasDriverPods(ctx context.Context, namespace string) bool
+	WaitForPodsReady(ctx context.Context, namespace, labelSelector string, timeout time.Duration) error
+	WaitForPodReady(ctx context.Context, namespace, appLabel string, timeout time.Duration) error
 }
 
 type Operands struct{}
@@ -38,10 +70,20 @@ func (o *Operands) Name() string {
 }
 
 func (o *Operands) Run(ctx context.Context, clients *k8s.Clients, cfg certification.Config) *certification.TestResult {
+	return o.run(ctx, clients, cfg)
+}
+
+func (o *Operands) run(ctx context.Context, clients operandVerificationClient, cfg certification.Config) *certification.TestResult {
 	result := certification.NewTestResult(o.Name())
 	defer result.Finalize()
 
 	timeout := cfg.ParseTimeout()
+
+	clusterPolicy, cpErr := clients.GetClusterPolicy(ctx)
+	if cpErr != nil {
+		result.Fail("failed to get ClusterPolicy: %v", cpErr)
+		return result
+	}
 
 	// Check driver pods (skip if driver is disabled or pre-installed on host)
 	if clients.HasDriverPods(ctx, cfg.Namespace) {
@@ -54,12 +96,16 @@ func (o *Operands) Run(ctx context.Context, clients *k8s.Clients, cfg certificat
 		result.AddDetail("driver pods: skipped (no operator-managed driver pods found)")
 	}
 
-	for _, operand := range operandLabels {
-		if err := clients.WaitForPodReady(ctx, cfg.Namespace, operand, timeout); err != nil {
-			result.Fail("operand %s: %v", operand, err)
+	for _, operand := range operands {
+		if !operand.isEnabled(&clusterPolicy.Spec) {
+			result.AddDetail("%s: skipped (disabled in ClusterPolicy)", operand.appLabel)
+			continue
+		}
+		if err := clients.WaitForPodReady(ctx, cfg.Namespace, operand.appLabel, timeout); err != nil {
+			result.Fail("operand %s: %v", operand.appLabel, err)
 			return result
 		}
-		result.AddDetail("%s: ready", operand)
+		result.AddDetail("%s: ready", operand.appLabel)
 	}
 
 	return result

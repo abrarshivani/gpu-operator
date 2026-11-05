@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	nvidiav1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1"
+
 	"github.com/NVIDIA/gpu-operator/internal/certification"
 	"github.com/NVIDIA/gpu-operator/internal/certification/k8s"
 )
@@ -34,13 +36,35 @@ const (
 
 type DCGMMetrics struct{}
 
+// dcgmMetricsClient is the subset of *k8s.Clients used by dcgm-metrics.
+type dcgmMetricsClient interface {
+	GetClusterPolicy(ctx context.Context) (*nvidiav1.ClusterPolicy, error)
+	WaitForCondition(ctx context.Context, timeout time.Duration, condition func(ctx context.Context) (bool, error)) error
+	GetServiceDirect(ctx context.Context, namespace, serviceName string, port int, path string) ([]byte, error)
+	ProxyGetService(ctx context.Context, namespace, serviceName string, port int, path string) ([]byte, error)
+}
+
 func (d *DCGMMetrics) Name() string {
 	return "dcgm-metrics"
 }
 
 func (d *DCGMMetrics) Run(ctx context.Context, clients *k8s.Clients, cfg certification.Config) *certification.TestResult {
+	return d.run(ctx, clients, cfg)
+}
+
+func (d *DCGMMetrics) run(ctx context.Context, clients dcgmMetricsClient, cfg certification.Config) *certification.TestResult {
 	result := certification.NewTestResult(d.Name())
 	defer result.Finalize()
+
+	clusterPolicy, cpErr := clients.GetClusterPolicy(ctx)
+	if cpErr != nil {
+		result.Fail("failed to get ClusterPolicy: %v", cpErr)
+		return result
+	}
+	if !clusterPolicy.Spec.DCGMExporter.IsEnabled() {
+		result.Skip("DCGM exporter is disabled in ClusterPolicy")
+		return result
+	}
 
 	result.AddDetail("querying DCGM exporter metrics (service %s:%d)",
 		dcgmExporterServiceName, dcgmExporterPort)
