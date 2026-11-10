@@ -29,10 +29,17 @@ namespace: gpu-operator
       # - TEST_SETS=TS1000,TS1001    # Or list specific sets to run
 ```
 
-`namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding. To change the namespace and test sets from the command line:
+`namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding.
+
+To change the namespace, for example to `nvidia-gpu-operator` on OpenShift:
 
 ```bash
 sed -i.bak 's/^namespace: .*/namespace: nvidia-gpu-operator/' deployments/gpu-operator-certification/kustomization.yaml
+```
+
+To change the test sets:
+
+```bash
 sed -i.bak 's/- TEST_SETS=.*/- TEST_SETS=TS1000,TS1001/' deployments/gpu-operator-certification/kustomization.yaml
 ```
 
