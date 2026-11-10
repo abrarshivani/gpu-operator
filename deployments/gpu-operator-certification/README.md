@@ -31,7 +31,7 @@ namespace: gpu-operator
 
 `namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding.
 
-To change the namespace, for example to `nvidia-gpu-operator` on OpenShift:
+To change the namespace:
 
 ```bash
 sed -i.bak 's/^namespace: .*/namespace: nvidia-gpu-operator/' deployments/gpu-operator-certification/kustomization.yaml
