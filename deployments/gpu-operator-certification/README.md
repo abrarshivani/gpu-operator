@@ -17,7 +17,7 @@ hack/download-certification-results.sh
 
 ## Configuration
 
-Configure the run in [`kustomization.yaml`](kustomization.yaml). `kubectl apply -k` applies these settings on top of `gpu-operator-certification.yaml`, so the manifest itself does not need to change.
+All settings live in [`kustomization.yaml`](kustomization.yaml), which generates the `gpu-operator-certification-config` ConfigMap. `gpu-operator-certification.yaml` does not need to change.
 
 ```yaml
 # Namespace the GPU Operator runs in, for example nvidia-gpu-operator on OpenShift.
@@ -29,7 +29,13 @@ namespace: gpu-operator
       # - TEST_SETS=TS1000,TS1001    # Or list specific sets to run
 ```
 
-`namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding. When it is not `gpu-operator`, pass the same namespace to `kubectl logs -n` and run the download script as `NAMESPACE=<namespace> hack/download-certification-results.sh`.
+`namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding. To change it from the command line:
+
+```bash
+sed -i.bak 's/^namespace: .*/namespace: nvidia-gpu-operator/' deployments/gpu-operator-certification/kustomization.yaml
+```
+
+When it is not `gpu-operator`, pass the same namespace to `kubectl logs -n` and run the download script as `NAMESPACE=<namespace> hack/download-certification-results.sh`.
 
 | Key | Default | Description |
 |-------|---------|-------------|
