@@ -31,6 +31,8 @@ namespace: gpu-operator
 
 `namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding.
 
+Edit `kustomization.yaml` directly, or change these settings from the command line.
+
 To change the namespace:
 
 ```bash
