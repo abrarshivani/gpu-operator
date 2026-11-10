@@ -29,7 +29,7 @@ namespace: gpu-operator
       # - TEST_SETS=TS1000,TS1001    # Or list specific sets to run
 ```
 
-`namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding.
+`namespace` applies to every object.
 
 Edit `kustomization.yaml` directly, or use these commands.
 
