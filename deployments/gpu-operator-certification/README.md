@@ -23,10 +23,10 @@ Configure the run in [`kustomization.yaml`](kustomization.yaml). `kubectl apply 
 # Namespace the GPU Operator runs in, for example nvidia-gpu-operator on OpenShift.
 namespace: gpu-operator
 ...
-      data:
-        TEST_SETS: "all"               # Run all TestSets
-        # TEST_SETS: "all,!TS1003"     # Exclude specific sets with "!"
-        # TEST_SETS: "TS1000,TS1001"   # Or list specific sets to run
+    literals:
+      - TEST_SETS=all                # Run all TestSets
+      # - TEST_SETS=all,!TS1003      # Exclude specific sets with "!"
+      # - TEST_SETS=TS1000,TS1001    # Or list specific sets to run
 ```
 
 `namespace` applies to every object, including the ServiceAccount in the ClusterRoleBinding. When it is not `gpu-operator`, pass the same namespace to `kubectl logs -n` and run the download script as `NAMESPACE=<namespace> hack/download-certification-results.sh`.
