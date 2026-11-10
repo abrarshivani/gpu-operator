@@ -2,6 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gpu-operator-certification-config
+  namespace: gpu-operator
   labels:
     app.kubernetes.io/name: gpu-operator-certification
     app.kubernetes.io/instance: gpu-operator-certification
@@ -45,6 +46,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: gpu-operator-certification
+  namespace: gpu-operator
   labels:
     app.kubernetes.io/name: gpu-operator-certification
     app.kubernetes.io/instance: gpu-operator-certification
@@ -134,6 +136,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: gpu-operator-certification
+  namespace: gpu-operator
   labels:
     app.kubernetes.io/name: gpu-operator-certification
     app.kubernetes.io/instance: gpu-operator-certification

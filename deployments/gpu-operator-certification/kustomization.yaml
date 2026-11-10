@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace the GPU Operator runs in, for example nvidia-gpu-operator on OpenShift.
+namespace: gpu-operator
+
+resources:
+  - gpu-operator-certification.yaml
+
+configMapGenerator:
+  - name: gpu-operator-certification-config
+    # Matches the ConfigMap in gpu-operator-certification.yaml; the namespace above still applies.
+    namespace: gpu-operator
+    behavior: merge
+    literals:
+      # "all", "all,!TS1003" to exclude a set, or a list such as "TS1000,TS1001"
+      - TEST_SETS=all
+      # Set all three to run TS1003 (Driver Update)
+      # - TARGET_DRIVER_REPOSITORY=nvcr.io/nvidia
+      # - TARGET_DRIVER_IMAGE=driver
+      # - TARGET_DRIVER_VERSION=580.126.16
