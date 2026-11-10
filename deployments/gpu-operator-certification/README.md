@@ -57,7 +57,7 @@ When the namespace is not `gpu-operator`, pass the same namespace to `kubectl lo
 
 ### Rerunning with a different configuration
 
-A Job runs only once. To run it again, for example with different test sets, update `kustomization.yaml`, then delete the previous run and apply again:
+A Job runs only once. To run it again, for example with different test sets, edit `kustomization.yaml` directly or use the commands above, then delete the previous run and apply again:
 
 ```bash
 kubectl delete -k deployments/gpu-operator-certification/
