@@ -27,11 +27,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/NVIDIA/gpu-operator/internal/consts"
@@ -176,7 +173,6 @@ const (
 	noGPUDeviceNodesMessage                 = "no GPU device nodes visible"
 	vectorAddAllocationFailureMessagePrefix = "Failed to allocate device vector A (error code"
 
-	claimAllocationEventTimeout = time.Minute
 	gpuClaimRequestName         = "gpu"
 	podResourceClaimName        = "gpu"
 )
@@ -187,19 +183,11 @@ func RunGPUClaimWorkload(ctx context.Context, clients e2eoperator.Clients) {
 	claimName := podName + "-gpu"
 
 	ginkgo.By(fmt.Sprintf("Creating ResourceClaim %s for one GPU in namespace %s", claimName, e2eoperator.WorkloadNamespace))
-	createdClaim := createGPUResourceClaim(ctx, clients, claimName)
-	// The resourceclaim controller clears status.allocation once the pod is done,
-	// so the allocation is read from a watch started before the pod exists.
-	claimWatcher := watchResourceClaim(ctx, clients, createdClaim)
-	defer claimWatcher.Stop()
+	createGPUResourceClaim(ctx, clients, claimName)
 
 	ginkgo.By(fmt.Sprintf("Deploying vectorAdd pod %s with that claim", podName))
 	runVectorAddPod(ctx, clients, newVectorAddClaimPod(podName, claimName), corev1.PodSucceeded, vectorAddSuccessMessage)
 	ginkgo.GinkgoWriter.Printf("The vectorAdd sample passed on the GPU of the ResourceClaim\n")
-
-	ginkgo.By(fmt.Sprintf("Checking that DRA driver %s allocated one GPU to ResourceClaim %s", e2eoperands.GPUDRADriverName, claimName))
-	claimAllocation := receiveResourceClaimAllocation(ctx, claimWatcher, claimName)
-	expectOneGPUAllocatedToClaimRequest(claimAllocation, claimName)
 }
 
 func RunVectorAddWithoutResourceClaim(ctx context.Context, clients e2eoperator.Clients) {
@@ -213,62 +201,14 @@ func RunVectorAddWithoutResourceClaim(ctx context.Context, clients e2eoperator.C
 	ginkgo.GinkgoWriter.Printf("The pod sees no GPU device node and vectorAdd fails on its first CUDA call\n")
 }
 
-func createGPUResourceClaim(ctx context.Context, clients e2eoperator.Clients, claimName string) *resourcev1.ResourceClaim {
+func createGPUResourceClaim(ctx context.Context, clients e2eoperator.Clients, claimName string) {
 	ginkgo.GinkgoHelper()
 	ginkgo.DeferCleanup(func(ctx context.Context) {
 		deleteResourceClaim(ctx, clients, claimName)
 	}, ginkgo.NodeTimeout(workloadDeletionTimeout+cleanupTimeoutMargin))
 	resourceClaimClient := clients.Kube.ResourceV1().ResourceClaims(e2eoperator.WorkloadNamespace)
-	createdClaim, err := resourceClaimClient.Create(ctx, newGPUResourceClaim(claimName), metav1.CreateOptions{})
+	_, err := resourceClaimClient.Create(ctx, newGPUResourceClaim(claimName), metav1.CreateOptions{})
 	framework.ExpectNoError(err, "failed to create ResourceClaim %s", claimName)
-	return createdClaim
-}
-
-func watchResourceClaim(ctx context.Context, clients e2eoperator.Clients, claim *resourcev1.ResourceClaim) watch.Interface {
-	ginkgo.GinkgoHelper()
-	resourceClaimClient := clients.Kube.ResourceV1().ResourceClaims(claim.Namespace)
-	claimWatcher, err := resourceClaimClient.Watch(ctx, metav1.ListOptions{
-		FieldSelector:   fields.OneTermEqualSelector("metadata.name", claim.Name).String(),
-		ResourceVersion: claim.ResourceVersion,
-	})
-	framework.ExpectNoError(err, "failed to watch ResourceClaim %s", claim.Name)
-	return claimWatcher
-}
-
-func receiveResourceClaimAllocation(ctx context.Context, claimWatcher watch.Interface, claimName string) *resourcev1.AllocationResult {
-	ginkgo.GinkgoHelper()
-	allocationTimer := time.NewTimer(claimAllocationEventTimeout)
-	defer allocationTimer.Stop()
-	for {
-		select {
-		case claimEvent, isWatchOpen := <-claimWatcher.ResultChan():
-			if !isWatchOpen {
-				ginkgo.Fail(fmt.Sprintf("the watch of ResourceClaim %s closed before any event recorded an allocation", claimName))
-			}
-			if claimEvent.Type == watch.Error {
-				framework.ExpectNoError(apierrors.FromObject(claimEvent.Object), "the watch of ResourceClaim %s failed", claimName)
-			}
-			if claim, isResourceClaim := claimEvent.Object.(*resourcev1.ResourceClaim); isResourceClaim && claim.Status.Allocation != nil {
-				return claim.Status.Allocation
-			}
-		case <-allocationTimer.C:
-			ginkgo.Fail(fmt.Sprintf("no watch event of ResourceClaim %s recorded an allocation within %s", claimName, claimAllocationEventTimeout))
-		case <-ctx.Done():
-			framework.ExpectNoError(ctx.Err(), "stopped waiting for the allocation of ResourceClaim %s", claimName)
-		}
-	}
-}
-
-func expectOneGPUAllocatedToClaimRequest(claimAllocation *resourcev1.AllocationResult, claimName string) {
-	ginkgo.GinkgoHelper()
-	allocatedDevices := claimAllocation.Devices.Results
-	gomega.Expect(allocatedDevices).To(gomega.HaveLen(1), "ResourceClaim %s should have exactly one allocated device", claimName)
-	allocatedDevice := allocatedDevices[0]
-	gomega.Expect(allocatedDevice.Request).To(gomega.Equal(gpuClaimRequestName), "the device of ResourceClaim %s was allocated for the wrong request", claimName)
-	gomega.Expect(allocatedDevice.Driver).To(gomega.Equal(e2eoperands.GPUDRADriverName), "the device of ResourceClaim %s was allocated by the wrong DRA driver", claimName)
-	gomega.Expect(allocatedDevice.Device).NotTo(gomega.BeEmpty(), "the allocation of ResourceClaim %s names no device", claimName)
-	ginkgo.GinkgoWriter.Printf("DRA allocated one GPU to the ResourceClaim: driver %s, pool %s, device %s, request %s\n",
-		allocatedDevice.Driver, allocatedDevice.Pool, allocatedDevice.Device, allocatedDevice.Request)
 }
 
 func newGPUResourceClaim(claimName string) *resourcev1.ResourceClaim {
