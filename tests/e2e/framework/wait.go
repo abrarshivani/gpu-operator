@@ -94,13 +94,22 @@ func WaitFor(ctx context.Context, timeout time.Duration, description string, che
 	return time.Since(waitStart)
 }
 
+func WaitForNotFound(ctx context.Context, timeout time.Duration, objectKindAndName string, getObject func(ctx context.Context) error) {
+	ginkgo.GinkgoHelper()
+	elapsed := WaitFor(ctx, timeout, fmt.Sprintf("Waiting for %s to be deleted", objectKindAndName), func(g gomega.Gomega) {
+		err := getObject(ctx)
+		g.Expect(err).To(gomega.HaveOccurred(), "%s still exists", objectKindAndName)
+		g.Expect(err).To(gomega.MatchError(apierrors.IsNotFound, "a NotFound error"), "failed to get %s: %v", objectKindAndName, err)
+	})
+	ginkgo.GinkgoWriter.Printf("%s has been deleted (%s)\n", objectKindAndName, elapsed.Round(time.Second))
+}
+
 func WaitForPodNotFound(ctx context.Context, kubeClient kubernetes.Interface, namespace, podName string, timeout time.Duration) {
 	ginkgo.GinkgoHelper()
-	elapsed := WaitFor(ctx, timeout, fmt.Sprintf("Waiting for pod %s/%s to be deleted", namespace, podName), func(g gomega.Gomega) {
+	WaitForNotFound(ctx, timeout, fmt.Sprintf("Pod %s/%s", namespace, podName), func(ctx context.Context) error {
 		_, err := kubeClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		g.Expect(err).To(gomega.MatchError(apierrors.IsNotFound, "a NotFound error"), "pod %s/%s still exists", namespace, podName)
+		return err
 	})
-	ginkgo.GinkgoWriter.Printf("Pod %s/%s has been deleted (%s)\n", namespace, podName, elapsed.Round(time.Second))
 }
 
 func WaitForPodOrphaned(ctx context.Context, kubeClient kubernetes.Interface, namespace, podName string, timeout time.Duration) {

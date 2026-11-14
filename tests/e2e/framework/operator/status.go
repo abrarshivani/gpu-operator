@@ -136,3 +136,47 @@ func WaitForDriverDaemonSets(ctx context.Context, clients Clients, driverName st
 	})
 	ginkgo.GinkgoWriter.Printf("NVIDIADriver/%s has driver daemonset(s) %s (%s)\n", driverName, strings.Join(daemonSetNames, ", "), elapsed.Round(time.Second))
 }
+
+const (
+	gpuClusterReadyTimeout    = 45 * time.Minute
+	gpuClusterDeletionTimeout = 2 * time.Minute
+)
+
+func WaitForGPUClusterReady(ctx context.Context, clients Clients) {
+	ginkgo.GinkgoHelper()
+	readinessDescription := fmt.Sprintf("Waiting for GPUCluster %s to be ready", GPUClusterName)
+	elapsed := framework.WaitFor(ctx, gpuClusterReadyTimeout, readinessDescription, func(g gomega.Gomega) {
+		gpuCluster, err := clients.GPUClusters.Get(ctx, GPUClusterName)
+		g.Expect(err).NotTo(gomega.HaveOccurred(), "failed to get GPUCluster %s: %v", GPUClusterName, err)
+		statusConditions := gpuCluster.Status.Conditions
+		gpuClusterStatusDescription := describeGPUClusterStatus(gpuCluster)
+		g.Expect(gpuCluster.Status.State).To(gomega.Equal(nvidiav1alpha1.Ready), "%s", gpuClusterStatusDescription)
+		g.Expect(meta.IsStatusConditionTrue(statusConditions, conditions.Ready)).To(gomega.BeTrue(), "%s", gpuClusterStatusDescription)
+		g.Expect(meta.IsStatusConditionTrue(statusConditions, conditions.Error)).To(gomega.BeFalse(), "%s", gpuClusterStatusDescription)
+	})
+	ginkgo.GinkgoWriter.Printf("GPUCluster %s is ready (%s)\n", GPUClusterName, elapsed.Round(time.Second))
+}
+
+func describeGPUClusterStatus(gpuCluster *nvidiav1alpha1.GPUCluster) string {
+	if gpuCluster.Status.State == "" && len(gpuCluster.Status.Conditions) == 0 {
+		return fmt.Sprintf("GPUCluster %s has no status yet; the operator has not reconciled it", gpuCluster.Name)
+	}
+	gpuClusterStateDescription := fmt.Sprintf("GPUCluster %s is in state %q", gpuCluster.Name, gpuCluster.Status.State)
+	statusCondition := meta.FindStatusCondition(gpuCluster.Status.Conditions, conditions.Error)
+	if statusCondition == nil || statusCondition.Status != metav1.ConditionTrue {
+		statusCondition = meta.FindStatusCondition(gpuCluster.Status.Conditions, conditions.Ready)
+	}
+	if statusCondition == nil {
+		return gpuClusterStateDescription
+	}
+	return fmt.Sprintf("%s; condition %s=%s (%s): %s", gpuClusterStateDescription,
+		statusCondition.Type, statusCondition.Status, statusCondition.Reason, statusCondition.Message)
+}
+
+func WaitForGPUClusterDeleted(ctx context.Context, clients Clients) {
+	ginkgo.GinkgoHelper()
+	framework.WaitForNotFound(ctx, gpuClusterDeletionTimeout, "GPUCluster "+GPUClusterName, func(ctx context.Context) error {
+		_, err := clients.GPUClusters.Get(ctx, GPUClusterName)
+		return err
+	})
+}

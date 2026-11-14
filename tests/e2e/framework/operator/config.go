@@ -27,6 +27,7 @@ const (
 	TestNamePrefix    = "gpu-operator-e2e"
 	WorkloadNamespace = "default"
 	ClusterPolicyName = "cluster-policy"
+	GPUClusterName    = "gpu-cluster"
 )
 
 type TestContextType struct {

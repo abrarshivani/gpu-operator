@@ -73,7 +73,7 @@ func NewInstall(chartValues ...string) *Install {
 		framework.ExpectNoError(err, "namespace %s was not deleted", TestContext.OperatorNamespace)
 
 		install.releaseName = fmt.Sprintf("gpu-operator-%s", framework.RandomSuffix())
-		ginkgo.DeferCleanup(install.uninstall, ginkgo.NodeTimeout(uninstallTimeout))
+		ginkgo.DeferCleanup(install.Uninstall, ginkgo.NodeTimeout(uninstallTimeout))
 
 		_, err = framework.CreateNamespace(ctx, TestContext.OperatorNamespace, install.Kube, nil)
 		framework.ExpectNoError(err, "failed to create namespace %s", TestContext.OperatorNamespace)
@@ -108,7 +108,7 @@ func NewInstall(chartValues ...string) *Install {
 	return install
 }
 
-func (install *Install) uninstall(ctx context.Context) {
+func (install *Install) Uninstall(ctx context.Context) {
 	ginkgo.GinkgoHelper()
 
 	if !install.failureLogsSaved {

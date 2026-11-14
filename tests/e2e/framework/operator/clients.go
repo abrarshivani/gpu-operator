@@ -19,6 +19,7 @@ package operator
 import (
 	"github.com/onsi/ginkgo/v2"
 
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/kubernetes"
 
 	gpuclientset "github.com/NVIDIA/gpu-operator/api/versioned"
@@ -28,10 +29,12 @@ import (
 
 type Clients struct {
 	Kube            kubernetes.Interface
+	APIExtensions   apiextensionsclientset.Interface
 	Pods            *helpers.PodClient
 	Nodes           *helpers.NodeClient
 	DaemonSets      *helpers.DaemonSetClient
 	ClusterPolicies *helpers.ClusterPolicyClient
+	GPUClusters     *helpers.GPUClusterClient
 	Drivers         *helpers.NvidiaDriverClient
 	Workloads       *helpers.WorkloadClient
 }
@@ -48,12 +51,17 @@ func NewClients() Clients {
 	gpuClient, err := gpuclientset.NewForConfig(config)
 	framework.ExpectNoError(err, "failed to create the GPU Operator clientset")
 
+	apiExtensionsClient, err := apiextensionsclientset.NewForConfig(config)
+	framework.ExpectNoError(err, "failed to create the API extensions clientset")
+
 	return Clients{
 		Kube:            kubeClient,
+		APIExtensions:   apiExtensionsClient,
 		Pods:            helpers.NewPodClient(kubeClient.CoreV1()),
 		Nodes:           helpers.NewNodeClient(kubeClient),
 		DaemonSets:      helpers.NewDaemonSetClient(kubeClient),
 		ClusterPolicies: helpers.NewClusterPolicyClient(gpuClient),
+		GPUClusters:     helpers.NewGPUClusterClient(gpuClient),
 		Drivers:         helpers.NewNvidiaDriverClient(gpuClient, kubeClient),
 		Workloads:       helpers.NewWorkloadClient(kubeClient),
 	}
